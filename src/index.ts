@@ -371,7 +371,7 @@ server.tool(
       `cd '${room}' || { echo "ERROR: cd failed"; sleep 10; exit 1; }`,
       `if [ ! -f '${promptFile}' ]; then echo "ERROR: Prompt file missing"; sleep 10; exit 1; fi`,
       `echo "Brain agent starting..."`,
-      `claude --dangerously-skip-permissions -p "$(cat '${promptFile}')"`,
+      `claude --dangerously-skip-permissions -p "$(cat '${promptFile}')" < /dev/null`,
       `EC=$?`,
       `rm -f '${promptFile}' '${scriptFile}'`,
       `echo ""`,

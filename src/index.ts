@@ -3,7 +3,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
+import { execSync, exec as execCb } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { BrainDB } from './db.js';
 
 // ── Initialize ──
@@ -312,6 +315,83 @@ server.tool(
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(claims, null, 2) }],
     };
+  }
+);
+
+// ═══════════════════════════════════════
+//  Session Orchestration
+// ═══════════════════════════════════════
+
+server.tool(
+  'brain_wake',
+  'Spawn a NEW Claude Code session in a tmux window to handle a task. Posts the task to the brain, then launches an interactive Claude session that picks it up. Use this to kick off a new agent or restart work after a session finishes.',
+  {
+    task: z.string().describe('The full task description for the new session to execute'),
+    name: z.string().optional().describe('Name for the new agent session (default: "agent-<timestamp>")'),
+  },
+  async ({ task, name }) => {
+    const sid = ensureSession();
+    const agentName = name || `agent-${Date.now()}`;
+    const tmuxName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+    // Verify we're inside tmux
+    try {
+      execSync('tmux display-message -p ""', { stdio: 'ignore' });
+    } catch {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: 'Not inside a tmux session. brain_wake requires tmux.' }) }],
+        isError: true,
+      };
+    }
+
+    // Post the task to the brain's tasks channel so the new session can read it
+    const taskId = db.postMessage('tasks', room, sid, sessionName, task);
+
+    // Build the initial prompt for the new session
+    const prompt = [
+      'You have brain MCP tools available (brain_register, brain_sessions, brain_post, brain_read, brain_dm, brain_inbox, brain_set, brain_get, brain_claim, brain_release, brain_claims, brain_wake).',
+      '',
+      `Do this:`,
+      `1. Call brain_register with name "${agentName}"`,
+      `2. Call brain_read with channel "tasks" to see your assignment`,
+      `3. Execute the most recent task posted there by "${sessionName}"`,
+      `4. When done, call brain_post to announce your results`,
+      `5. Check brain_inbox for any follow-up messages`,
+    ].join('\n');
+
+    // Write prompt to temp file to avoid shell escaping issues
+    const promptFile = join(tmpdir(), `brain-wake-${Date.now()}.txt`);
+    writeFileSync(promptFile, prompt);
+
+    try {
+      // Create tmux window with claude
+      execSync(`tmux new-window -n "${tmuxName}" "cd '${room}' && claude"`);
+
+      // Background: wait for Claude Code to initialize, then paste the prompt via tmux buffer
+      execCb(
+        `sleep 6 && tmux load-buffer "${promptFile}" && tmux paste-buffer -t "${tmuxName}" && tmux send-keys -t "${tmuxName}" Enter && rm -f "${promptFile}"`,
+        () => {} // fire-and-forget
+      );
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            ok: true,
+            agent: agentName,
+            taskId,
+            tmuxWindow: tmuxName,
+            message: `Spawned new Claude Code session "${agentName}" in tmux window "${tmuxName}". Task posted to brain tasks channel.`,
+          }, null, 2),
+        }],
+      };
+    } catch (err: any) {
+      try { execSync(`rm -f "${promptFile}"`); } catch { /* cleanup */ }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: err.message || String(err) }) }],
+        isError: true,
+      };
+    }
   }
 );
 

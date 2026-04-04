@@ -328,13 +328,13 @@ server.tool(
   {
     task: z.string().describe('The full task description for the new session to execute'),
     name: z.string().optional().describe('Name for the new agent session (default: "agent-<timestamp>")'),
-    mode: z.enum(['pane', 'window']).optional().describe('"pane" = split view side-by-side (DEFAULT, best for watching). "window" = new tmux tab.'),
+    layout: z.enum(['vertical', 'horizontal', 'tiled', 'window']).optional().describe('"vertical" = stacked top/bottom (DEFAULT). "horizontal" = side by side. "tiled" = auto-grid. "window" = new tmux tab.'),
   },
-  async ({ task, name, mode }) => {
+  async ({ task, name, layout }) => {
     const sid = ensureSession();
     const agentName = name || `agent-${Date.now()}`;
     const tmuxName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const spawnMode = mode || 'pane';
+    const spawnLayout = layout || 'vertical';
 
     // Verify we're inside tmux
     try {
@@ -368,25 +368,44 @@ server.tool(
     try {
       let target: string;
 
-      if (spawnMode === 'pane') {
-        // Split pane — visible side by side. Returns the new pane ID.
-        const paneId = execSync(
-          `tmux split-window -h -P -F '#{pane_id}' "cd '${room}' && claude"`
-        ).toString().trim();
-        // Auto-arrange all panes in a tiled grid
-        execSync('tmux select-layout tiled');
-        target = paneId;
-      } else {
-        // New tmux tab
+      if (spawnLayout === 'window') {
+        // New tmux tab (separate window)
         execSync(`tmux new-window -n "${tmuxName}" "cd '${room}' && claude"`);
         target = tmuxName;
+      } else {
+        // Split pane — visible in the same view
+        // -v = vertical split (top/bottom), -h = horizontal split (left/right)
+        const splitFlag = spawnLayout === 'horizontal' ? '-h' : '-v';
+        const paneId = execSync(
+          `tmux split-window ${splitFlag} -P -F '#{pane_id}' "cd '${room}' && claude"`
+        ).toString().trim();
+
+        // Apply the best layout for multiple panes
+        if (spawnLayout === 'tiled') {
+          execSync('tmux select-layout tiled');
+        } else if (spawnLayout === 'vertical') {
+          execSync('tmux select-layout even-vertical');
+        } else {
+          execSync('tmux select-layout even-horizontal');
+        }
+
+        target = paneId;
       }
 
       // Background: wait for Claude Code to initialize, then paste the prompt via tmux buffer
+      // Use a unique buffer name to prevent race conditions with multiple spawns
+      const bufferName = `brain-${Date.now()}`;
       execCb(
-        `sleep 7 && tmux load-buffer "${promptFile}" && tmux paste-buffer -t "${target}" && tmux send-keys -t "${target}" Enter && rm -f "${promptFile}"`,
+        `sleep 7 && tmux load-buffer -b "${bufferName}" "${promptFile}" && tmux paste-buffer -b "${bufferName}" -t "${target}" && tmux send-keys -t "${target}" Enter && tmux delete-buffer -b "${bufferName}" && rm -f "${promptFile}"`,
         () => {} // fire-and-forget
       );
+
+      const layoutDesc: Record<string, string> = {
+        vertical: 'stacked top/bottom',
+        horizontal: 'side by side',
+        tiled: 'auto-grid',
+        window: `tmux tab "${tmuxName}"`,
+      };
 
       return {
         content: [{
@@ -395,10 +414,8 @@ server.tool(
             ok: true,
             agent: agentName,
             taskId,
-            mode: spawnMode,
-            message: spawnMode === 'pane'
-              ? `Spawned "${agentName}" in a split pane. You should see it side-by-side now.`
-              : `Spawned "${agentName}" in tmux window "${tmuxName}". Switch with Ctrl-B + number.`,
+            layout: spawnLayout,
+            message: `Spawned "${agentName}" — ${layoutDesc[spawnLayout]}.`,
           }, null, 2),
         }],
       };

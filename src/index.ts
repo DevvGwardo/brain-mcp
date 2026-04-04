@@ -334,7 +334,7 @@ server.tool(
     const sid = ensureSession();
     const agentName = name || `agent-${Date.now()}`;
     const tmuxName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const spawnLayout = layout || 'vertical';
+    const spawnLayout = layout || 'horizontal';
 
     // Verify we're inside tmux
     try {

@@ -34,28 +34,19 @@ Give your AI agents a shared brain. Communicate, coordinate, and spawn<br>parall
 git clone https://github.com/DevvGwardo/brain-mcp.git ~/brain-mcp && cd ~/brain-mcp && npm install && npm run build && ./install.sh
 ```
 
-The install script automatically adds the brain MCP server and permissions to your Claude Code global settings. Works in **every project** — no per-project config needed.
+The install script registers the brain MCP server via `claude mcp add`. Works in **every project** globally.
 
 **Or install manually:**
 
 ```bash
-claude mcp add brain -- node ~/brain-mcp/dist/index.js
+claude mcp add brain -s user -- node ~/brain-mcp/dist/index.js
 ```
 
-<details>
-<summary>Manual settings.json setup</summary>
+Verify it's connected:
 
-```json
-{
-  "mcpServers": {
-    "brain": {
-      "command": "node",
-      "args": ["~/brain-mcp/dist/index.js"]
-    }
-  },
-  "permissions": {
-    "allow": ["mcp__brain"]
-  }
+```bash
+claude mcp list | grep brain
+# brain: node /Users/.../brain-mcp/dist/index.js - ✓ Connected
 }
 ```
 

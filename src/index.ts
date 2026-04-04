@@ -368,11 +368,14 @@ server.tool(
     writeFileSync(promptFile, prompt);
     writeFileSync(scriptFile, [
       '#!/bin/bash',
-      `cd '${room}'`,
-      `claude --dangerously-skip-permissions -p < '${promptFile}'`,
+      `cd '${room}' || { echo "ERROR: cd failed"; sleep 10; exit 1; }`,
+      `if [ ! -f '${promptFile}' ]; then echo "ERROR: Prompt file missing"; sleep 10; exit 1; fi`,
+      `echo "Brain agent starting..."`,
+      `claude --dangerously-skip-permissions -p "$(cat '${promptFile}')"`,
+      `EC=$?`,
       `rm -f '${promptFile}' '${scriptFile}'`,
       `echo ""`,
-      `echo "Agent complete. Closing in 3s..."`,
+      `if [ $EC -eq 0 ]; then echo "Agent complete. Closing in 3s..."; else echo "Agent exited ($EC). Closing in 10s..."; sleep 7; fi`,
       `sleep 3`,
     ].join('\n'), { mode: 0o755 });
 

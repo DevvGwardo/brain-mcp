@@ -324,15 +324,17 @@ server.tool(
 
 server.tool(
   'brain_wake',
-  'Spawn a NEW Claude Code session in a tmux window to handle a task. Posts the task to the brain, then launches an interactive Claude session that picks it up. Use this to kick off a new agent or restart work after a session finishes.',
+  'Spawn a NEW Claude Code session to handle a task. Opens as a visible split pane (side-by-side) by default so you can watch it work, or as a new tmux tab. Posts the task to the brain, then launches an interactive Claude session that picks it up.',
   {
     task: z.string().describe('The full task description for the new session to execute'),
     name: z.string().optional().describe('Name for the new agent session (default: "agent-<timestamp>")'),
+    mode: z.enum(['pane', 'window']).optional().describe('"pane" = split view side-by-side (DEFAULT, best for watching). "window" = new tmux tab.'),
   },
-  async ({ task, name }) => {
+  async ({ task, name, mode }) => {
     const sid = ensureSession();
     const agentName = name || `agent-${Date.now()}`;
     const tmuxName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const spawnMode = mode || 'pane';
 
     // Verify we're inside tmux
     try {
@@ -364,12 +366,25 @@ server.tool(
     writeFileSync(promptFile, prompt);
 
     try {
-      // Create tmux window with claude
-      execSync(`tmux new-window -n "${tmuxName}" "cd '${room}' && claude"`);
+      let target: string;
+
+      if (spawnMode === 'pane') {
+        // Split pane — visible side by side. Returns the new pane ID.
+        const paneId = execSync(
+          `tmux split-window -h -P -F '#{pane_id}' "cd '${room}' && claude"`
+        ).toString().trim();
+        // Auto-arrange all panes in a tiled grid
+        execSync('tmux select-layout tiled');
+        target = paneId;
+      } else {
+        // New tmux tab
+        execSync(`tmux new-window -n "${tmuxName}" "cd '${room}' && claude"`);
+        target = tmuxName;
+      }
 
       // Background: wait for Claude Code to initialize, then paste the prompt via tmux buffer
       execCb(
-        `sleep 6 && tmux load-buffer "${promptFile}" && tmux paste-buffer -t "${tmuxName}" && tmux send-keys -t "${tmuxName}" Enter && rm -f "${promptFile}"`,
+        `sleep 7 && tmux load-buffer "${promptFile}" && tmux paste-buffer -t "${target}" && tmux send-keys -t "${target}" Enter && rm -f "${promptFile}"`,
         () => {} // fire-and-forget
       );
 
@@ -380,8 +395,10 @@ server.tool(
             ok: true,
             agent: agentName,
             taskId,
-            tmuxWindow: tmuxName,
-            message: `Spawned new Claude Code session "${agentName}" in tmux window "${tmuxName}". Task posted to brain tasks channel.`,
+            mode: spawnMode,
+            message: spawnMode === 'pane'
+              ? `Spawned "${agentName}" in a split pane. You should see it side-by-side now.`
+              : `Spawned "${agentName}" in tmux window "${tmuxName}". Switch with Ctrl-B + number.`,
           }, null, 2),
         }],
       };

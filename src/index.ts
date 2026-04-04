@@ -359,27 +359,32 @@ server.tool(
       `3. Execute the most recent task posted there by "${sessionName}"`,
       `4. When done, call brain_post to announce your results`,
       `5. Check brain_inbox for any follow-up messages`,
-      `6. IMPORTANT: When you are completely finished with all work, type /exit to close this session cleanly`,
     ].join('\n');
 
-    // Write prompt to temp file to avoid shell escaping issues
-    const promptFile = join(tmpdir(), `brain-wake-${Date.now()}.txt`);
+    // Write prompt and runner script to temp files
+    const ts = Date.now();
+    const promptFile = join(tmpdir(), `brain-prompt-${ts}.txt`);
+    const scriptFile = join(tmpdir(), `brain-run-${ts}.sh`);
     writeFileSync(promptFile, prompt);
+    writeFileSync(scriptFile, [
+      '#!/bin/bash',
+      `cd '${room}'`,
+      `PROMPT=$(cat '${promptFile}')`,
+      `rm -f '${promptFile}'`,
+      `claude --dangerously-skip-permissions -p "$PROMPT"`,
+      `rm -f '${scriptFile}'`,
+    ].join('\n'), { mode: 0o755 });
 
     try {
-      let target: string;
-
       if (spawnLayout === 'window') {
-        // New tmux tab (separate window)
-        execSync(`tmux new-window -n "${tmuxName}" "cd '${room}' && claude --dangerously-skip-permissions"`);
-        target = tmuxName;
+        // New tmux tab
+        execSync(`tmux new-window -n "${tmuxName}" "bash '${scriptFile}'"`);
       } else {
         // Split pane — visible in the same view
-        // -v = vertical split (top/bottom), -h = horizontal split (left/right)
         const splitFlag = spawnLayout === 'horizontal' ? '-h' : '-v';
-        const paneId = execSync(
-          `tmux split-window ${splitFlag} -P -F '#{pane_id}' "cd '${room}' && claude --dangerously-skip-permissions"`
-        ).toString().trim();
+        execSync(
+          `tmux split-window ${splitFlag} "bash '${scriptFile}'"`
+        );
 
         // Apply the best layout for multiple panes
         if (spawnLayout === 'tiled') {
@@ -389,17 +394,7 @@ server.tool(
         } else {
           execSync('tmux select-layout even-horizontal');
         }
-
-        target = paneId;
       }
-
-      // Background: wait for Claude Code to initialize, then paste the prompt via tmux buffer
-      // Use a unique buffer name to prevent race conditions with multiple spawns
-      const bufferName = `brain-${Date.now()}`;
-      execCb(
-        `sleep 7 && tmux load-buffer -b "${bufferName}" "${promptFile}" && tmux paste-buffer -b "${bufferName}" -t "${target}" && tmux send-keys -t "${target}" Enter && tmux delete-buffer -b "${bufferName}" && rm -f "${promptFile}"`,
-        () => {} // fire-and-forget
-      );
 
       const layoutDesc: Record<string, string> = {
         vertical: 'stacked top/bottom',

@@ -361,50 +361,25 @@ server.tool(
       `5. Check brain_inbox for any follow-up messages`,
     ].join('\n');
 
-    // Write prompt and runner script to temp files
+    // Write prompt to temp file
     const ts = Date.now();
     const promptFile = join(tmpdir(), `brain-prompt-${ts}.txt`);
-    const scriptFile = join(tmpdir(), `brain-run-${ts}.sh`);
+    const bufferName = `brain-${ts}`;
     writeFileSync(promptFile, prompt);
-    // Write script using heredoc approach to avoid any escaping issues
-    const logFile = join(tmpdir(), `brain-agent-${ts}.log`);
-    const scriptContent = `#!/bin/bash
-LOG="${logFile}"
-echo "=== Brain Agent ===" | tee "$LOG"
-echo "Date: $(date)" | tee -a "$LOG"
-echo "Script: ${scriptFile}" | tee -a "$LOG"
-echo "Prompt: ${promptFile}" | tee -a "$LOG"
-cd '${room}' || { echo "ERROR: cd failed" | tee -a "$LOG"; sleep 10; exit 1; }
-echo "PWD: $(pwd)" | tee -a "$LOG"
-if [ ! -f '${promptFile}' ]; then echo "ERROR: Prompt file not found" | tee -a "$LOG"; sleep 10; exit 1; fi
-echo "Prompt size: $(wc -c < '${promptFile}') bytes" | tee -a "$LOG"
-echo "Running claude -p..." | tee -a "$LOG"
-PROMPT_TEXT=$(cat '${promptFile}')
-claude --dangerously-skip-permissions -p "$PROMPT_TEXT" < /dev/null 2>&1 | tee -a "$LOG"
-EC=\${PIPESTATUS[0]}
-rm -f '${promptFile}'
-echo "" | tee -a "$LOG"
-if [ $EC -eq 0 ]; then
-  echo "Agent complete. Closing in 3s..." | tee -a "$LOG"
-else
-  echo "Agent exited with code $EC. Closing in 10s..." | tee -a "$LOG"
-  sleep 7
-fi
-sleep 3
-rm -f '${scriptFile}'
-`;
-    writeFileSync(scriptFile, scriptContent, { mode: 0o755 });
 
     try {
+      let target: string;
+
       if (spawnLayout === 'window') {
-        // New tmux tab
-        execSync(`tmux new-window -n "${tmuxName}" "bash '${scriptFile}'"`);
+        // New tmux tab — interactive claude session
+        execSync(`tmux new-window -n "${tmuxName}" "cd '${room}' && claude --dangerously-skip-permissions"`);
+        target = tmuxName;
       } else {
-        // Split pane — visible in the same view
+        // Split pane — visible side by side, interactive claude session
         const splitFlag = spawnLayout === 'horizontal' ? '-h' : '-v';
-        execSync(
-          `tmux split-window ${splitFlag} "bash '${scriptFile}'"`
-        );
+        const paneId = execSync(
+          `tmux split-window ${splitFlag} -P -F '#{pane_id}' "cd '${room}' && claude --dangerously-skip-permissions"`
+        ).toString().trim();
 
         // Apply the best layout for multiple panes
         if (spawnLayout === 'tiled') {
@@ -414,7 +389,48 @@ rm -f '${scriptFile}'
         } else {
           execSync('tmux select-layout even-horizontal');
         }
+
+        target = paneId;
       }
+
+      // Write a watcher script that:
+      // 1. Waits for claude to initialize
+      // 2. Pastes the prompt
+      // 3. Monitors for completion (❯ prompt)
+      // 4. Sends /exit to close cleanly
+      const watcherFile = join(tmpdir(), `brain-watch-${ts}.sh`);
+      const watcherContent = `#!/bin/bash
+# Wait for Claude Code to initialize
+sleep 7
+
+# Paste the prompt into the pane
+tmux load-buffer -b "${bufferName}" "${promptFile}"
+tmux paste-buffer -b "${bufferName}" -t "${target}"
+tmux send-keys -t "${target}" Enter
+tmux delete-buffer -b "${bufferName}" 2>/dev/null
+rm -f "${promptFile}"
+
+# Watch for completion — when the agent finishes, ❯ appears
+# Wait at least 30s before checking (give agent time to work)
+sleep 30
+for i in $(seq 1 360); do
+  sleep 5
+  # Check if pane still exists
+  tmux display-message -t "${target}" -p "" 2>/dev/null || break
+  # Capture last few lines and look for idle prompt
+  TAIL=$(tmux capture-pane -t "${target}" -p 2>/dev/null | grep -v '^$' | tail -3)
+  if echo "$TAIL" | grep -q '❯'; then
+    sleep 2
+    tmux send-keys -t "${target}" "/exit" Enter
+    break
+  fi
+done
+rm -f "${watcherFile}"
+`;
+      writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
+
+      // Fire-and-forget the watcher in the background
+      execCb(`bash "${watcherFile}" &`, () => {});
 
       const layoutDesc: Record<string, string> = {
         vertical: 'stacked top/bottom',

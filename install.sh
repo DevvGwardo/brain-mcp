@@ -35,10 +35,13 @@ const settings = JSON.parse(fs.readFileSync(path, 'utf8'));
 // Add mcpServers if missing
 if (!settings.mcpServers) settings.mcpServers = {};
 
-// Add brain server
+// Add brain server with explicit PATH for reliable startup
 settings.mcpServers.brain = {
   command: 'node',
-  args: [brainPath]
+  args: [brainPath],
+  env: {
+    PATH: [process.env.HOME + '/.local/bin', '/usr/local/bin', '/usr/bin', '/bin', '/opt/homebrew/bin'].join(':')
+  }
 };
 
 // Add permission if missing

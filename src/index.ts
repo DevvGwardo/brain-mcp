@@ -440,20 +440,35 @@ server.tool(
           `tmux split-window -h -P -F '#{pane_id}' "cd '${room}' && claude --dangerously-skip-permissions"`
         ).toString().trim();
 
-        // Layout: main pane on left (large), workers stacked on right
+        // Count total panes to pick the best layout
+        const agentColor = AGENT_COLORS[spawnedAgentCount % AGENT_COLORS.length];
+        spawnedAgentCount++;
+
         try {
-          if (spawnLayout === 'tiled') {
+          // Get total pane count for smart layout decisions
+          let paneCount = 2;
+          try {
+            paneCount = parseInt(execSync(`tmux list-panes | wc -l`).toString().trim(), 10) || 2;
+          } catch { /* default */ }
+
+          if (spawnLayout === 'tiled' || paneCount > 4) {
+            // For 4+ panes, tiled grid gives the most even distribution
             execSync('tmux select-layout tiled');
+          } else if (paneCount <= 2) {
+            // 2 panes: simple side by side, lead on left
+            execSync('tmux select-layout even-horizontal');
           } else {
+            // 3-4 panes: main-vertical, lead on left at 40%
             execSync('tmux select-layout main-vertical');
-            try { execSync('tmux resize-pane -t "{top-left}" -x 45%'); } catch { /* older tmux */ }
+            try { execSync('tmux resize-pane -t "{top-left}" -x 40%'); } catch { /* older tmux */ }
           }
 
-          // Assign a unique color to this agent's pane border
-          const agentColor = AGENT_COLORS[spawnedAgentCount % AGENT_COLORS.length];
-          spawnedAgentCount++;
-          execSync(`tmux select-pane -t "${paneId}" -P 'fg=default,bg=default'`);
-          try { execSync(`tmux set-option -p -t "${paneId}" pane-border-style 'fg=${agentColor}'`); } catch { /* per-pane border needs tmux 3.2+ */ }
+          // After layout, rebalance all panes evenly within their section
+          // This prevents panes from getting crushed as more spawn
+          try { execSync('tmux select-layout -E'); } catch { /* -E flag needs tmux 3.1+ */ }
+
+          // Color this agent's pane border
+          try { execSync(`tmux set-option -p -t "${paneId}" pane-border-style 'fg=${agentColor}'`); } catch { /* per-pane needs tmux 3.2+ */ }
 
           // Main pane styling: purple tint + bright border
           execSync(`tmux set-option -w pane-active-border-style 'fg=#9333EA,bold'`);

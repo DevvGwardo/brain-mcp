@@ -423,37 +423,58 @@ server.tool(
       // 4. Sends /exit to close cleanly
       const watcherFile = join(tmpdir(), `brain-watch-${ts}.sh`);
       const watcherContent = `#!/bin/bash
-# Wait for Claude Code to initialize
-sleep 7
+TARGET="${target}"
+PROMPT="${promptFile}"
+BUFFER="${bufferName}"
 
-# Paste the prompt into the pane
-tmux load-buffer -b "${bufferName}" "${promptFile}"
-tmux paste-buffer -b "${bufferName}" -t "${target}"
-tmux send-keys -t "${target}" Enter
-tmux delete-buffer -b "${bufferName}" 2>/dev/null
-rm -f "${promptFile}"
+# Phase 1: Wait for Claude Code to be READY (not just started)
+# Poll until the pane shows the input prompt (❯ in UTF-8: 0xe2 0x9d 0xaf)
+READY=0
+for i in $(seq 1 60); do
+  sleep 2
+  tmux display-message -t "$TARGET" -p "" 2>/dev/null || exit 0
+  CONTENT=$(tmux capture-pane -t "$TARGET" -p 2>/dev/null)
+  if echo "$CONTENT" | LC_ALL=C grep -qF $'\\xe2\\x9d\\xaf' 2>/dev/null; then
+    READY=1
+    break
+  fi
+  # Fallback: also check for common Claude Code ready indicators
+  if echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null; then
+    READY=1
+    break
+  fi
+done
 
-# Watch for completion using content stability detection
-# Claude Code constantly updates the spinner/status while working.
-# When idle, the pane content stops changing. If stable for 15s, agent is done.
-sleep 45
+if [ $READY -eq 0 ]; then
+  # Last resort: just wait a flat 15 seconds
+  sleep 15
+fi
+
+# Phase 2: Paste the prompt
+tmux load-buffer -b "$BUFFER" "$PROMPT"
+tmux paste-buffer -b "$BUFFER" -t "$TARGET"
+sleep 0.5
+tmux send-keys -t "$TARGET" Enter
+tmux delete-buffer -b "$BUFFER" 2>/dev/null
+rm -f "$PROMPT"
+
+# Phase 3: Watch for completion using content stability detection
+# Claude Code constantly updates spinner/status while working.
+# When idle, content stops changing. 15s stable = done.
+sleep 30
 PREV_HASH=""
 STABLE=0
 for i in $(seq 1 240); do
   sleep 5
-  # Check if pane still exists
-  tmux display-message -t "${target}" -p "" 2>/dev/null || break
-  # Hash the pane content
-  HASH=$(tmux capture-pane -t "${target}" -p 2>/dev/null | md5 2>/dev/null || tmux capture-pane -t "${target}" -p 2>/dev/null | md5sum 2>/dev/null | cut -d' ' -f1)
+  tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
+  HASH=$(tmux capture-pane -t "$TARGET" -p 2>/dev/null | md5 2>/dev/null || tmux capture-pane -t "$TARGET" -p 2>/dev/null | md5sum 2>/dev/null | cut -d' ' -f1)
   if [ "$HASH" = "$PREV_HASH" ]; then
     STABLE=$((STABLE + 1))
-    # 3 checks × 5s = 15 seconds of no change → agent is done
     if [ $STABLE -ge 3 ]; then
       sleep 2
-      tmux send-keys -t "${target}" "/exit" Enter
-      # Wait for exit, then force-kill if still alive
+      tmux send-keys -t "$TARGET" "/exit" Enter
       sleep 5
-      tmux display-message -t "${target}" -p "" 2>/dev/null && tmux kill-pane -t "${target}" 2>/dev/null
+      tmux display-message -t "$TARGET" -p "" 2>/dev/null && tmux kill-pane -t "$TARGET" 2>/dev/null
       break
     fi
   else

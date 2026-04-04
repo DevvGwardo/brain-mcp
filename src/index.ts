@@ -41,10 +41,32 @@ process.on('SIGTERM', () => { cleanup(); process.exit(0); });
 
 // ── MCP Server ──
 
-const server = new McpServer({
-  name: 'brain',
-  version: '1.0.0',
-});
+const server = new McpServer(
+  {
+    name: 'brain',
+    version: '1.0.0',
+  },
+  {
+    instructions: `Brain MCP — Multi-Agent Orchestration Server
+
+This server provides tools for multiple Claude Code sessions to communicate, coordinate, and spawn parallel agents.
+
+WHEN TO USE THESE TOOLS:
+- When the user says "with N agents", "in parallel", "spawn agents", "use brain", "swarm", or "split this across agents"
+- When you need to coordinate work with other Claude Code sessions
+- When you want to spawn visible side-by-side Claude Code sessions via tmux
+
+HOW TO ORCHESTRATE:
+1. brain_register — name yourself (e.g. "lead", "architect")
+2. Analyze the task, split it into independent pieces with NON-OVERLAPPING files
+3. brain_set — store shared context so spawned agents can read it
+4. brain_wake — spawn each agent with a clear task description. Each agent appears as a real interactive Claude Code session in a tmux split pane
+5. brain_read — monitor progress as agents post their results
+6. brain_claim/brain_release — mutex locks to prevent file conflicts
+
+IMPORTANT: Do NOT fall back to the built-in Agent tool when the user asks for parallel agents or brain_wake. Use these brain tools instead — they spawn visible, independent Claude Code sessions that the user can watch.`,
+  }
+);
 
 // ═══════════════════════════════════════
 //  Identity & Discovery

@@ -366,18 +366,34 @@ server.tool(
     const promptFile = join(tmpdir(), `brain-prompt-${ts}.txt`);
     const scriptFile = join(tmpdir(), `brain-run-${ts}.sh`);
     writeFileSync(promptFile, prompt);
-    writeFileSync(scriptFile, [
-      '#!/bin/bash',
-      `cd '${room}' || { echo "ERROR: cd failed"; sleep 10; exit 1; }`,
-      `if [ ! -f '${promptFile}' ]; then echo "ERROR: Prompt file missing"; sleep 10; exit 1; fi`,
-      `echo "Brain agent starting..."`,
-      `claude --dangerously-skip-permissions -p "$(cat '${promptFile}')" < /dev/null`,
-      `EC=$?`,
-      `rm -f '${promptFile}' '${scriptFile}'`,
-      `echo ""`,
-      `if [ $EC -eq 0 ]; then echo "Agent complete. Closing in 3s..."; else echo "Agent exited ($EC). Closing in 10s..."; sleep 7; fi`,
-      `sleep 3`,
-    ].join('\n'), { mode: 0o755 });
+    // Write script using heredoc approach to avoid any escaping issues
+    const logFile = join(tmpdir(), `brain-agent-${ts}.log`);
+    const scriptContent = `#!/bin/bash
+LOG="${logFile}"
+echo "=== Brain Agent ===" | tee "$LOG"
+echo "Date: $(date)" | tee -a "$LOG"
+echo "Script: ${scriptFile}" | tee -a "$LOG"
+echo "Prompt: ${promptFile}" | tee -a "$LOG"
+cd '${room}' || { echo "ERROR: cd failed" | tee -a "$LOG"; sleep 10; exit 1; }
+echo "PWD: $(pwd)" | tee -a "$LOG"
+if [ ! -f '${promptFile}' ]; then echo "ERROR: Prompt file not found" | tee -a "$LOG"; sleep 10; exit 1; fi
+echo "Prompt size: $(wc -c < '${promptFile}') bytes" | tee -a "$LOG"
+echo "Running claude -p..." | tee -a "$LOG"
+PROMPT_TEXT=$(cat '${promptFile}')
+claude --dangerously-skip-permissions -p "$PROMPT_TEXT" < /dev/null 2>&1 | tee -a "$LOG"
+EC=\${PIPESTATUS[0]}
+rm -f '${promptFile}'
+echo "" | tee -a "$LOG"
+if [ $EC -eq 0 ]; then
+  echo "Agent complete. Closing in 3s..." | tee -a "$LOG"
+else
+  echo "Agent exited with code $EC. Closing in 10s..." | tee -a "$LOG"
+  sleep 7
+fi
+sleep 3
+rm -f '${scriptFile}'
+`;
+    writeFileSync(scriptFile, scriptContent, { mode: 0o755 });
 
     try {
       if (spawnLayout === 'window') {

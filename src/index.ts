@@ -369,10 +369,11 @@ server.tool(
     writeFileSync(scriptFile, [
       '#!/bin/bash',
       `cd '${room}'`,
-      `PROMPT=$(cat '${promptFile}')`,
-      `rm -f '${promptFile}'`,
-      `claude --dangerously-skip-permissions -p "$PROMPT"`,
-      `rm -f '${scriptFile}'`,
+      `claude --dangerously-skip-permissions -p < '${promptFile}'`,
+      `rm -f '${promptFile}' '${scriptFile}'`,
+      `echo ""`,
+      `echo "Agent complete. Closing in 3s..."`,
+      `sleep 3`,
     ].join('\n'), { mode: 0o755 });
 
     try {

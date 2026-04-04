@@ -371,14 +371,14 @@ server.tool(
 
       if (spawnLayout === 'window') {
         // New tmux tab (separate window)
-        execSync(`tmux new-window -n "${tmuxName}" "cd '${room}' && claude"`);
+        execSync(`tmux new-window -n "${tmuxName}" "cd '${room}' && claude --dangerously-skip-permissions"`);
         target = tmuxName;
       } else {
         // Split pane — visible in the same view
         // -v = vertical split (top/bottom), -h = horizontal split (left/right)
         const splitFlag = spawnLayout === 'horizontal' ? '-h' : '-v';
         const paneId = execSync(
-          `tmux split-window ${splitFlag} -P -F '#{pane_id}' "cd '${room}' && claude"`
+          `tmux split-window ${splitFlag} -P -F '#{pane_id}' "cd '${room}' && claude --dangerously-skip-permissions"`
         ).toString().trim();
 
         // Apply the best layout for multiple panes

@@ -318,6 +318,23 @@ server.tool(
   }
 );
 
+server.tool(
+  'brain_clear',
+  'Clear all brain data — messages, state, claims, sessions. Use this to reset the brain for a fresh start.',
+  {
+    confirm: z.boolean().describe('Must be true to confirm the clear operation'),
+  },
+  async ({ confirm }) => {
+    if (!confirm) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ cleared: false, reason: 'confirm must be true' }) }] };
+    }
+    const counts = db.clear();
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify({ cleared: true, ...counts }) }],
+    };
+  }
+);
+
 // ═══════════════════════════════════════
 //  Session Orchestration
 // ═══════════════════════════════════════
@@ -346,19 +363,25 @@ server.tool(
       };
     }
 
-    // Post the task to the brain's tasks channel so the new session can read it
+    // Post the task to the brain for audit trail
     const taskId = db.postMessage('tasks', room, sid, sessionName, task);
 
-    // Build the initial prompt for the new session
+    // Build the prompt with the task embedded directly — no need to read from brain
     const prompt = [
       'You have brain MCP tools available (brain_register, brain_sessions, brain_post, brain_read, brain_dm, brain_inbox, brain_set, brain_get, brain_claim, brain_release, brain_claims, brain_wake).',
       '',
-      `Do this:`,
-      `1. Call brain_register with name "${agentName}"`,
-      `2. Call brain_read with channel "tasks" to see your assignment`,
-      `3. Execute the most recent task posted there by "${sessionName}"`,
-      `4. When done, call brain_post to announce your results`,
-      `5. Check brain_inbox for any follow-up messages`,
+      `IMPORTANT: Use brain_claim before editing any file, and brain_release when done. This prevents conflicts with other agents.`,
+      '',
+      `Your name: "${agentName}"`,
+      `Assigned by: "${sessionName}"`,
+      '',
+      `YOUR TASK:`,
+      task,
+      '',
+      `WHEN DONE:`,
+      `1. Call brain_register with name "${agentName}" (if not already registered)`,
+      `2. Call brain_post to announce what you accomplished`,
+      `3. Release all claimed files with brain_release`,
     ].join('\n');
 
     // Write prompt to temp file

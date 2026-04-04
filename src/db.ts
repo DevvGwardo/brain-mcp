@@ -290,6 +290,15 @@ export class BrainDB {
     return this.db.prepare('SELECT * FROM claims').all() as Claim[];
   }
 
+  clear(): Record<string, number> {
+    const messages = this.db.prepare('DELETE FROM messages').run().changes;
+    const dms = this.db.prepare('DELETE FROM direct_messages').run().changes;
+    const state = this.db.prepare('DELETE FROM state').run().changes;
+    const claims = this.db.prepare('DELETE FROM claims').run().changes;
+    const sessions = this.db.prepare('DELETE FROM sessions').run().changes;
+    return { messages, dms, state, claims, sessions };
+  }
+
   close(): void {
     this.db.close();
   }

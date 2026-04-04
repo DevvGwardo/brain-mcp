@@ -10,7 +10,6 @@ Give your AI agents a shared brain. Communicate, coordinate, and spawn<br>parall
 
 <br>
 
-[![npm](https://img.shields.io/badge/npm-brain--mcp-CB3837?logo=npm&logoColor=white)](https://www.npmjs.com/package/brain-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-3DA639.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-7C3AED)](https://modelcontextprotocol.io)
@@ -18,7 +17,7 @@ Give your AI agents a shared brain. Communicate, coordinate, and spawn<br>parall
 
 <br>
 
-[Getting Started](#install) · [Tools](#tools) · [Agent Spawning](#agent-spawning) · [Architecture](#architecture) · [Examples](#examples)
+[Install](#install) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Tools](#tools) · [Advanced](#advanced)
 
 <br>
 
@@ -28,285 +27,183 @@ Give your AI agents a shared brain. Communicate, coordinate, and spawn<br>parall
 
 ## Install
 
-**One command** — clone, build, and configure:
-
 ```bash
-git clone https://github.com/DevvGwardo/brain-mcp.git ~/brain-mcp && cd ~/brain-mcp && npm install && npm run build && ./install.sh
+git clone https://github.com/DevvGwardo/brain-mcp.git ~/brain-mcp \
+  && cd ~/brain-mcp \
+  && npm install \
+  && npm run build \
+  && ./install.sh
 ```
 
-The install script registers the brain MCP server via `claude mcp add`. Works in **every project** globally.
-
-**Or install manually:**
+**Or manually:**
 
 ```bash
 claude mcp add brain -s user -- node ~/brain-mcp/dist/index.js
 ```
 
-Verify it's connected:
+**Verify:**
 
 ```bash
 claude mcp list | grep brain
-# brain: node /Users/.../brain-mcp/dist/index.js - ✓ Connected
-}
-```
-
-</details>
+# brain: node .../brain-mcp/dist/index.js - ✓ Connected
 ```
 
 Restart Claude Code. Done.
 
 ---
 
-## What is this?
+## Quick Start
 
-Multiple Claude Code sessions can't talk to each other. They duplicate work, create merge conflicts, and have no way to coordinate.
-
-**Brain MCP fixes this.** It gives every session access to a shared brain — messages, state, resource locks, and the ability to spawn new agents in split tmux panes.
+Open any project in Claude Code and say:
 
 ```
-"Add proper error handling with 3 agents"
+Refactor the API routes with 3 agents
 ```
 
-That's all you need to say. Claude auto-splits the work, spawns parallel agents side by side, and coordinates through the brain.
+That's it. Claude registers as lead, splits the work, spawns 3 agents in tmux panes, and coordinates through the brain.
+
+**More examples:**
+
+```
+Add error handling to the whole codebase with 4 agents
+```
+```
+Review this project in parallel with 2 agents
+```
+```
+Use brain_wake to spawn 6 agents that each improve a different module
+```
 
 ---
 
-## Architecture
+## How It Works
 
 ```mermaid
 graph TB
-    subgraph "Your Terminal (tmux)"
-        A["Claude Code #1<br/><b>lead</b>"]
-        B["Claude Code #2<br/><b>worker-a</b>"]
-        C["Claude Code #3<br/><b>worker-b</b>"]
+    subgraph "Your Terminal"
+        direction LR
+        L["Lead Agent<br/><small>plans + coordinates</small>"]
+        W1["Worker 1<br/><small>hooks</small>"]
+        W2["Worker 2<br/><small>api</small>"]
+        W3["Worker 3<br/><small>components</small>"]
     end
 
-    A -->|brain_wake| B
-    A -->|brain_wake| C
+    L -->|"brain_wake"| W1
+    L -->|"brain_wake"| W2
+    L -->|"brain_wake"| W3
 
-    subgraph "Brain MCP"
-        D[("SQLite WAL<br/>~/.claude/brain/brain.db")]
-        E["Channels & DMs"]
-        F["Shared State K/V"]
-        G["Resource Locks"]
+    subgraph "Brain"
+        DB[("SQLite")]
+        CH["Channels"]
+        KV["Shared State"]
+        MX["Mutex Locks"]
     end
 
-    A <-->|stdio| D
-    B <-->|stdio| D
-    C <-->|stdio| D
+    L <--> DB
+    W1 <--> DB
+    W2 <--> DB
+    W3 <--> DB
 
-    E --> D
-    F --> D
-    G --> D
-
-    style A fill:#7C3AED,stroke:#5B21B6,color:#fff
-    style B fill:#2563EB,stroke:#1D4ED8,color:#fff
-    style C fill:#2563EB,stroke:#1D4ED8,color:#fff
-    style D fill:#F59E0B,stroke:#D97706,color:#000
+    style L fill:#9333EA,stroke:#7C3AED,color:#fff
+    style W1 fill:#3B82F6,stroke:#2563EB,color:#fff
+    style W2 fill:#10B981,stroke:#059669,color:#fff
+    style W3 fill:#F59E0B,stroke:#D97706,color:#000
+    style DB fill:#1E293B,stroke:#334155,color:#fff
+    style CH fill:#1E293B,stroke:#334155,color:#fff
+    style KV fill:#1E293B,stroke:#334155,color:#fff
+    style MX fill:#1E293B,stroke:#334155,color:#fff
 ```
 
-Each Claude Code session spawns its own `brain-mcp` process via stdio. All processes share the same SQLite database (WAL mode for safe concurrent access). Sessions in the **same working directory** auto-group into a room. Zero server management required.
+Each Claude Code session spawns its own `brain-mcp` process via stdio. All processes share the same SQLite database with WAL mode for safe concurrent access. Sessions in the same directory auto-group into a room.
+
+**No server to manage. No config per project. Just install once and use everywhere.**
 
 ---
 
 ## Tools
 
-### Identity & Discovery
+16 tools across 6 categories.
 
-| Tool | Description |
-|:-----|:------------|
-| `brain_register` | Set a display name for this session |
-| `brain_sessions` | List all active sessions |
-| `brain_status` | Show this session's info and room |
+### Identity
+
+| Tool | What it does |
+|:-----|:-------------|
+| `brain_register` | Name this session |
+| `brain_sessions` | List active sessions |
+| `brain_status` | Show session info + room |
 
 ### Messaging
 
-| Tool | Description |
-|:-----|:------------|
-| `brain_post` | Post a message to a channel (room-scoped) |
-| `brain_read` | Read messages from a channel with polling support |
-| `brain_dm` | Send a direct message to another session |
-| `brain_inbox` | Read direct messages |
+| Tool | What it does |
+|:-----|:-------------|
+| `brain_post` | Post to a channel |
+| `brain_read` | Read from a channel |
+| `brain_dm` | Direct message another session |
+| `brain_inbox` | Read your DMs |
 
 ### Shared State
 
-| Tool | Description |
-|:-----|:------------|
-| `brain_set` | Set a key-value pair in shared state |
-| `brain_get` | Read a value from shared state |
-| `brain_keys` | List all keys in a scope |
-| `brain_delete` | Remove a key from shared state |
+| Tool | What it does |
+|:-----|:-------------|
+| `brain_set` | Store a key-value pair |
+| `brain_get` | Read a value |
+| `brain_keys` | List all keys |
+| `brain_delete` | Remove a key |
 
-### Resource Coordination
+### Coordination
 
-| Tool | Description |
-|:-----|:------------|
-| `brain_claim` | Claim exclusive access to a resource (mutex) |
-| `brain_release` | Release a claimed resource |
-| `brain_claims` | List all active claims |
+| Tool | What it does |
+|:-----|:-------------|
+| `brain_claim` | Lock a resource (mutex) |
+| `brain_release` | Unlock a resource |
+| `brain_claims` | List all locks |
 
-### Agent Spawning
+### Orchestration
 
-| Tool | Description |
-|:-----|:------------|
-| `brain_wake` | Spawn a new Claude Code session in a tmux pane with a task |
-
-`brain_wake` layout options:
-
-| Layout | View | Best for |
-|:-------|:-----|:---------|
-| `horizontal` | Side by side (default) | 2 agents |
-| `vertical` | Stacked top/bottom | 2 agents, full width |
-| `tiled` | Auto-grid | 3+ agents |
-| `window` | New tmux tab | Background work |
+| Tool | What it does |
+|:-----|:-------------|
+| `brain_wake` | Spawn a new Claude Code session in tmux |
+| `brain_clear` | Reset all brain data |
 
 ---
 
 ## Agent Spawning
 
-One agent can spawn others with `brain_wake`. Spawned agents:
-
-- Open in **visible tmux split panes** (side by side by default)
-- Run with `--dangerously-skip-permissions` for unattended execution
-- Use `claude -p` (print mode) so they **auto-exit when done** — panes close cleanly
-- Read their task from the brain's `tasks` channel automatically
+`brain_wake` opens a real interactive Claude Code session in a tmux split pane:
 
 ```mermaid
 sequenceDiagram
-    participant Lead as Lead Agent
-    participant Brain as Brain DB
-    participant W1 as Worker 1
-    participant W2 as Worker 2
+    participant L as Lead
+    participant B as Brain
+    participant W as Worker
 
-    Lead->>Brain: brain_set("shared-context", ...)
-    Lead->>Brain: brain_wake("worker-1", task)
-    Lead->>Brain: brain_wake("worker-2", task)
+    L->>B: brain_set("context", ...)
+    L->>B: brain_wake("worker", task)
+    B-->>W: Opens tmux pane
 
-    Brain-->>W1: Spawns in tmux pane
-    Brain-->>W2: Spawns in tmux pane
+    W->>B: brain_register("worker")
+    W->>B: brain_claim("src/api/")
 
-    W1->>Brain: brain_register("worker-1")
-    W2->>Brain: brain_register("worker-2")
+    Note over W: Does the work
 
-    W1->>Brain: brain_get("shared-context")
-    W2->>Brain: brain_get("shared-context")
+    W->>B: brain_post("done")
+    W->>B: brain_release("src/api/")
+    W-->>W: Auto-exit
 
-    W1->>Brain: brain_claim("src/hooks/")
-    W2->>Brain: brain_claim("src/api/")
-
-    Note over W1,W2: Both work in parallel
-
-    W1->>Brain: brain_post("hooks done")
-    W1->>Brain: brain_release("src/hooks/")
-    W1-->>W1: auto-exit, pane closes
-
-    W2->>Brain: brain_post("api done")
-    W2->>Brain: brain_release("src/api/")
-    W2-->>W2: auto-exit, pane closes
-
-    Lead->>Brain: brain_read() → sees both reports
+    L->>B: brain_read()
+    Note over L: Sees results
 ```
 
----
+**Layout options:**
 
-## Examples
+| Layout | View | Best for |
+|:-------|:-----|:---------|
+| `horizontal` | Side by side (default) | 2 agents |
+| `vertical` | Top / bottom | Full width |
+| `tiled` | Auto-grid | 3+ agents |
+| `window` | New tmux tab | Background |
 
-### Simple — just talk naturally
-
-```
-"Refactor the API routes with 2 agents"
-```
-
-```
-"Add loading states to all components, use 3 agents"
-```
-
-```
-"Review this codebase in parallel"
-```
-
-> Add the [Brain orchestration instructions](https://github.com/DevvGwardo/brain-mcp#claude-code-instructions) to your `CLAUDE.md` and Claude will automatically use the brain tools when you mention parallel agents.
-
-### Manual — step by step
-
-**Session 1 — Architect**
-```
-brain_register("architect")
-brain_set(key="api_contract", value='{"users": "GET /api/users"}')
-brain_post(content="Contract is set. Frontend: take users. Backend: take posts.")
-```
-
-**Session 2 — Frontend**
-```
-brain_register("frontend")
-brain_read()                              # sees architect's message
-brain_get(key="api_contract")             # reads the contract
-brain_claim("src/pages/Users.tsx")        # locks the file
-brain_dm(to="backend", content="What shape is the /users response?")
-```
-
-**Session 3 — Backend**
-```
-brain_register("backend")
-brain_inbox()                             # sees frontend's question
-brain_claim("src/api/posts.ts", ttl=300)  # auto-releases in 5 min
-brain_post(content="Users response: { id, name, email }[]")
-```
-
----
-
-## Claude Code Instructions
-
-Add this to your project's `CLAUDE.md` so Claude automatically orchestrates when you say "with N agents":
-
-```markdown
-## Brain MCP — Multi-Agent Orchestration
-
-The `brain` MCP server enables multiple Claude Code sessions to communicate
-and coordinate. When the user asks to parallelize work, use multiple agents,
-split a task, or swarm something, use the brain tools automatically.
-
-### How to orchestrate
-1. `brain_register` with a name describing your role
-2. Analyze the task and decide how to split it across agents
-3. Read relevant files to build shared context
-4. `brain_set` the shared context so spawned agents can read it
-5. `brain_wake` each agent with a clear task
-6. Monitor with `brain_read` until all agents report back
-7. Post a final summary
-
-### Rules
-- Each agent gets different files — never assign the same file to two agents
-- Use `brain_claim` before editing, `brain_release` after
-- For 3+ agents, pass `layout: "tiled"` to `brain_wake`
-```
-
----
-
-## Configuration
-
-All configuration is through environment variables:
-
-| Variable | Default | Description |
-|:---------|:--------|:------------|
-| `BRAIN_SESSION_NAME` | `session-{pid}` | Pre-set session name |
-| `BRAIN_ROOM` | Working directory | Override automatic room grouping |
-| `BRAIN_DB_PATH` | `~/.claude/brain/brain.db` | Custom database location |
-
-```json
-{
-  "mcpServers": {
-    "brain": {
-      "command": "node",
-      "args": ["~/brain-mcp/dist/index.js"],
-      "env": {
-        "BRAIN_SESSION_NAME": "worker-1",
-        "BRAIN_ROOM": "my-project"
-      }
-    }
-  }
-}
-```
+**The lead pane** gets a purple tint and sits on the left at 45% width. Worker panes stack on the right, each with a unique colored border (blue, emerald, amber, red, violet, pink, cyan, orange, teal, purple).
 
 ---
 
@@ -314,12 +211,346 @@ All configuration is through environment variables:
 
 | | Claude Code Teams | Brain MCP |
 |:--|:--|:--|
-| **Visibility** | Hidden background workers | Visible split panes |
-| **Communication** | None between subagents | Channels, DMs, shared state |
+| **Visibility** | Hidden | Visible split panes |
+| **Communication** | None between agents | Channels, DMs, state |
 | **File safety** | Can conflict | Mutex locking |
 | **Persistence** | Dies with session | Survives restarts |
 | **Spawning** | Parent only | Any agent can spawn more |
-| **Independence** | Tied to parent context | Fully standalone sessions |
+| **Independence** | Shared context | Fully standalone |
+
+---
+
+# Advanced
+
+Everything below covers the full technical depth of Brain MCP.
+
+---
+
+## Architecture Deep Dive
+
+```mermaid
+graph TB
+    subgraph "Claude Code Sessions"
+        S1["Session 1<br/><small>PID 1234</small>"]
+        S2["Session 2<br/><small>PID 1235</small>"]
+        S3["Session 3<br/><small>PID 1236</small>"]
+    end
+
+    subgraph "MCP Layer"
+        M1["brain-mcp<br/><small>stdio</small>"]
+        M2["brain-mcp<br/><small>stdio</small>"]
+        M3["brain-mcp<br/><small>stdio</small>"]
+    end
+
+    S1 --- M1
+    S2 --- M2
+    S3 --- M3
+
+    subgraph "Storage"
+        DB[("brain.db<br/><small>SQLite WAL</small>")]
+    end
+
+    M1 --> DB
+    M2 --> DB
+    M3 --> DB
+
+    subgraph "Database Tables"
+        T1["sessions<br/><small>id, name, room, heartbeat</small>"]
+        T2["messages<br/><small>channel, room, sender, content</small>"]
+        T3["direct_messages<br/><small>from, to, content</small>"]
+        T4["state<br/><small>key, scope, value</small>"]
+        T5["claims<br/><small>resource, owner, ttl</small>"]
+    end
+
+    DB --- T1
+    DB --- T2
+    DB --- T3
+    DB --- T4
+    DB --- T5
+
+    style S1 fill:#9333EA,stroke:#7C3AED,color:#fff
+    style S2 fill:#3B82F6,stroke:#2563EB,color:#fff
+    style S3 fill:#10B981,stroke:#059669,color:#fff
+    style DB fill:#F59E0B,stroke:#D97706,color:#000
+    style T1 fill:#1E293B,stroke:#475569,color:#94A3B8
+    style T2 fill:#1E293B,stroke:#475569,color:#94A3B8
+    style T3 fill:#1E293B,stroke:#475569,color:#94A3B8
+    style T4 fill:#1E293B,stroke:#475569,color:#94A3B8
+    style T5 fill:#1E293B,stroke:#475569,color:#94A3B8
+```
+
+**Key design decisions:**
+
+- **One process per session**: Each Claude Code session spawns its own `brain-mcp` process. No shared long-running server.
+- **SQLite WAL mode**: Multiple processes can read simultaneously. Writes are serialized with a 5-second busy timeout.
+- **Heartbeat cleanup**: Sessions that haven't pinged in 5 minutes are considered dead and excluded from listings.
+- **Room scoping**: The working directory is the default room. Sessions in the same directory see each other's messages and state.
+
+---
+
+## Scoping Model
+
+```mermaid
+graph LR
+    subgraph "Room: ~/project-a"
+        A1["Session A1"]
+        A2["Session A2"]
+    end
+
+    subgraph "Room: ~/project-b"
+        B1["Session B1"]
+    end
+
+    subgraph "Brain DB"
+        CH_A["#general<br/><small>room: project-a</small>"]
+        CH_B["#general<br/><small>room: project-b</small>"]
+        DM["Direct Messages<br/><small>cross-room</small>"]
+        GS["Global State<br/><small>scope: global</small>"]
+    end
+
+    A1 <--> CH_A
+    A2 <--> CH_A
+    B1 <--> CH_B
+    A1 <-.->|DM| B1
+    A1 <-.-> GS
+    B1 <-.-> GS
+
+    style A1 fill:#3B82F6,stroke:#2563EB,color:#fff
+    style A2 fill:#3B82F6,stroke:#2563EB,color:#fff
+    style B1 fill:#10B981,stroke:#059669,color:#fff
+```
+
+| Scope | How it works |
+|:------|:-------------|
+| **Room** | Sessions in the same `cwd` share channels and state by default |
+| **Channels** | Named streams within a room (e.g. `general`, `tasks`) |
+| **DMs** | Cross-room direct messages between any two sessions |
+| **Global state** | Use `scope: "global"` in `brain_set`/`brain_get` for cross-room data |
+
+---
+
+## Spawned Agent Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Spawning: brain_wake called
+
+    Spawning --> Initializing: tmux pane created
+    Initializing --> WaitingForReady: Claude Code loading
+
+    state "Ready Detection" as Ready {
+        WaitingForReady --> CheckPane: poll every 2s
+        CheckPane --> PromptDetected: status bar text found
+        CheckPane --> WaitingForReady: not ready yet
+        CheckPane --> FallbackWait: 60 attempts
+        FallbackWait --> PromptDetected: 15s flat sleep
+    }
+
+    PromptDetected --> PromptPasted: tmux paste-buffer
+    PromptPasted --> Working: Agent executes task
+
+    state "Working" as Working {
+        [*] --> ReadingBrain: brain_get context
+        ReadingBrain --> ClaimingFiles: brain_claim
+        ClaimingFiles --> Editing: make changes
+        Editing --> ReleasingFiles: brain_release
+        ReleasingFiles --> PostingResults: brain_post
+    }
+
+    Working --> Idle: Task complete
+
+    state "Auto-Exit Detection" as AutoExit {
+        Idle --> HashCheck: content hash every 5s
+        HashCheck --> StableCount: hash unchanged
+        StableCount --> HashCheck: count < 3
+        StableCount --> SendExit: 3 consecutive (15s stable)
+    }
+
+    SendExit --> ExitSent: /exit sent to pane
+    ExitSent --> PaneClosed: Claude exits
+    PaneClosed --> ForceKill: still alive after 5s
+    ExitSent --> [*]: pane closed
+    ForceKill --> [*]: tmux kill-pane
+```
+
+**Three phases:**
+
+1. **Ready detection** — Polls the tmux pane every 2 seconds looking for Claude Code's status bar. Falls back to a 15-second flat wait.
+2. **Prompt injection** — Uses `tmux load-buffer` + `tmux paste-buffer` to send the task prompt to the interactive session.
+3. **Auto-exit** — Hashes pane content every 5 seconds. When unchanged for 15 seconds (3 checks), sends `/exit`. Force-kills if still alive after 5 more seconds.
+
+---
+
+## Conflict Prevention
+
+```mermaid
+sequenceDiagram
+    participant A as Agent A
+    participant B as Brain DB
+    participant C as Agent C
+
+    Note over A,C: Both want to edit src/api/routes.ts
+
+    A->>B: brain_claim("src/api/routes.ts")
+    B-->>A: { claimed: true }
+
+    C->>B: brain_claim("src/api/routes.ts")
+    B-->>C: { claimed: false, owner: "Agent A" }
+
+    Note over C: Skips file, works on something else
+
+    A->>B: brain_release("src/api/routes.ts")
+
+    C->>B: brain_claim("src/api/routes.ts")
+    B-->>C: { claimed: true }
+```
+
+**Two layers of protection:**
+
+1. **Planning layer** — The lead agent assigns non-overlapping files to each worker
+2. **Runtime layer** — `brain_claim` is an atomic mutex. The second claimer gets `{ claimed: false, owner: "..." }` and must skip or wait
+
+**TTL safety net**: `brain_claim("file", ttl=300)` auto-releases after 5 minutes, preventing zombie locks from crashed agents.
+
+---
+
+## Tmux Layout Engine
+
+```mermaid
+graph TB
+    subgraph "main-vertical layout"
+        direction LR
+        subgraph "Left 45%"
+            Lead["LEAD<br/><small>purple tint</small><br/><small>bright border</small>"]
+        end
+        subgraph "Right 55%"
+            W1["Worker 1<br/><small>blue border</small>"]
+            W2["Worker 2<br/><small>emerald border</small>"]
+            W3["Worker 3<br/><small>amber border</small>"]
+            W4["Worker 4<br/><small>red border</small>"]
+        end
+    end
+
+    style Lead fill:#0d0a1a,stroke:#9333EA,color:#fff,stroke-width:3px
+    style W1 fill:#0F172A,stroke:#3B82F6,color:#fff
+    style W2 fill:#0F172A,stroke:#10B981,color:#fff
+    style W3 fill:#0F172A,stroke:#F59E0B,color:#fff
+    style W4 fill:#0F172A,stroke:#EF4444,color:#fff
+```
+
+**10 agent colors** (cycling): blue, emerald, amber, red, violet, pink, cyan, orange, teal, purple
+
+**Layout auto-selection:**
+- Default: `main-vertical` — lead on left, workers stacked right
+- `tiled`: even grid for 3+ agents
+- `horizontal` / `vertical`: simple 2-pane splits
+- `window`: separate tmux tab
+
+---
+
+## Database Schema
+
+```mermaid
+erDiagram
+    sessions {
+        text id PK
+        text name
+        int pid
+        text cwd
+        text room
+        text metadata
+        text created_at
+        text last_heartbeat
+    }
+
+    messages {
+        int id PK
+        text channel
+        text room
+        text sender_id FK
+        text sender_name
+        text content
+        text metadata
+        text created_at
+    }
+
+    direct_messages {
+        int id PK
+        text from_id FK
+        text from_name
+        text to_id FK
+        text content
+        text metadata
+        text created_at
+    }
+
+    state {
+        text key PK
+        text scope PK
+        text value
+        text updated_by FK
+        text updated_by_name
+        text updated_at
+    }
+
+    claims {
+        text resource PK
+        text owner_id FK
+        text owner_name
+        text room
+        text expires_at
+        text claimed_at
+    }
+
+    sessions ||--o{ messages : sends
+    sessions ||--o{ direct_messages : sends
+    sessions ||--o{ state : updates
+    sessions ||--o{ claims : owns
+```
+
+**Database location**: `~/.claude/brain/brain.db`
+
+**Indexes**: channel+room+id on messages, to_id+id on DMs, room on sessions
+
+---
+
+## Configuration Reference
+
+| Variable | Default | Description |
+|:---------|:--------|:------------|
+| `BRAIN_SESSION_NAME` | `session-{pid}` | Pre-set session name |
+| `BRAIN_ROOM` | Working directory | Override room grouping |
+| `BRAIN_DB_PATH` | `~/.claude/brain/brain.db` | Custom database path |
+
+---
+
+## CLAUDE.md Integration
+
+Add to your project's `CLAUDE.md` for automatic orchestration:
+
+```markdown
+## Brain MCP
+
+When the user asks for parallel agents, multi-agent work, or swarm:
+1. brain_register as "lead"
+2. Split work across agents with non-overlapping files
+3. brain_set shared context
+4. brain_wake each agent
+5. Monitor with brain_read
+6. brain_claim before editing, brain_release after
+```
+
+---
+
+## Companion: Brain Swarm
+
+[Brain Swarm](https://github.com/DevvGwardo/brain-swarm) adds predefined team templates on top of Brain MCP:
+
+```
+Swarm this codebase with the dev team
+```
+
+Spawns a 6-agent pipeline: planner, backend-dev, frontend-dev, tester, reviewer, deployer.
 
 ---
 
@@ -327,8 +558,8 @@ All configuration is through environment variables:
 
 ```bash
 npm run dev     # Watch mode
-npm run build   # Build
-npm start       # Run directly
+npm run build   # Compile
+npm start       # Run server
 ```
 
 ---
@@ -337,9 +568,9 @@ npm start       # Run directly
 
 <br>
 
-Node.js 18+ &nbsp;&middot;&nbsp; Claude Code with MCP support &nbsp;&middot;&nbsp; tmux (for `brain_wake`)
+Node.js 18+ &nbsp;&middot;&nbsp; Claude Code &nbsp;&middot;&nbsp; tmux &nbsp;&middot;&nbsp; [MCP Protocol](https://modelcontextprotocol.io)
 
-[MIT License](LICENSE) &nbsp;&middot;&nbsp; Built for the [Model Context Protocol](https://modelcontextprotocol.io) ecosystem
+[MIT License](LICENSE)
 
 <br>
 

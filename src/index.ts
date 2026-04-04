@@ -433,20 +433,33 @@ tmux send-keys -t "${target}" Enter
 tmux delete-buffer -b "${bufferName}" 2>/dev/null
 rm -f "${promptFile}"
 
-# Watch for completion — when the agent finishes, ❯ appears
-# Wait at least 30s before checking (give agent time to work)
-sleep 30
-for i in $(seq 1 360); do
+# Watch for completion using content stability detection
+# Claude Code constantly updates the spinner/status while working.
+# When idle, the pane content stops changing. If stable for 15s, agent is done.
+sleep 45
+PREV_HASH=""
+STABLE=0
+for i in $(seq 1 240); do
   sleep 5
   # Check if pane still exists
   tmux display-message -t "${target}" -p "" 2>/dev/null || break
-  # Capture last few lines and look for idle prompt
-  TAIL=$(tmux capture-pane -t "${target}" -p 2>/dev/null | grep -v '^$' | tail -3)
-  if echo "$TAIL" | grep -q '❯'; then
-    sleep 2
-    tmux send-keys -t "${target}" "/exit" Enter
-    break
+  # Hash the pane content
+  HASH=$(tmux capture-pane -t "${target}" -p 2>/dev/null | md5 2>/dev/null || tmux capture-pane -t "${target}" -p 2>/dev/null | md5sum 2>/dev/null | cut -d' ' -f1)
+  if [ "$HASH" = "$PREV_HASH" ]; then
+    STABLE=$((STABLE + 1))
+    # 3 checks × 5s = 15 seconds of no change → agent is done
+    if [ $STABLE -ge 3 ]; then
+      sleep 2
+      tmux send-keys -t "${target}" "/exit" Enter
+      # Wait for exit, then force-kill if still alive
+      sleep 5
+      tmux display-message -t "${target}" -p "" 2>/dev/null && tmux kill-pane -t "${target}" 2>/dev/null
+      break
+    fi
+  else
+    STABLE=0
   fi
+  PREV_HASH="$HASH"
 done
 rm -f "${watcherFile}"
 `;

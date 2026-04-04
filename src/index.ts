@@ -16,6 +16,21 @@ const room = process.env.BRAIN_ROOM || process.cwd();
 const roomLabel = basename(room);
 
 let sessionId: string | null = null;
+let spawnedAgentCount = 0;
+
+// Colors for each spawned agent pane border (cycles through these)
+const AGENT_COLORS = [
+  '#3B82F6', // blue
+  '#10B981', // emerald
+  '#F59E0B', // amber
+  '#EF4444', // red
+  '#8B5CF6', // violet
+  '#EC4899', // pink
+  '#06B6D4', // cyan
+  '#F97316', // orange
+  '#14B8A6', // teal
+  '#A855F7', // purple
+];
 let sessionName = process.env.BRAIN_SESSION_NAME || `session-${process.pid}`;
 
 function ensureSession(): string {
@@ -425,25 +440,26 @@ server.tool(
           `tmux split-window -h -P -F '#{pane_id}' "cd '${room}' && claude --dangerously-skip-permissions"`
         ).toString().trim();
 
-        // Use main-vertical layout: lead pane on left (large), workers stacked on right
-        // This keeps the main agent prominent and easily accessible
+        // Layout: main pane on left (large), workers stacked on right
         try {
           if (spawnLayout === 'tiled') {
             execSync('tmux select-layout tiled');
           } else {
             execSync('tmux select-layout main-vertical');
-            // Give the main pane ~45% of the width
             try { execSync('tmux resize-pane -t "{top-left}" -x 45%'); } catch { /* older tmux */ }
           }
 
-          // Style: bright border on main pane, dim on workers
-          execSync(`tmux set-option -w pane-active-border-style 'fg=#9333EA'`);
-          execSync(`tmux set-option -w pane-border-style 'fg=#333333'`);
+          // Assign a unique color to this agent's pane border
+          const agentColor = AGENT_COLORS[spawnedAgentCount % AGENT_COLORS.length];
+          spawnedAgentCount++;
+          execSync(`tmux select-pane -t "${paneId}" -P 'fg=default,bg=default'`);
+          try { execSync(`tmux set-option -p -t "${paneId}" pane-border-style 'fg=${agentColor}'`); } catch { /* per-pane border needs tmux 3.2+ */ }
 
-          // Give the main (lead) pane a subtle purple tint to make it stand out
+          // Main pane styling: purple tint + bright border
+          execSync(`tmux set-option -w pane-active-border-style 'fg=#9333EA,bold'`);
           execSync(`tmux select-pane -t '{top-left}' -P 'bg=#0d0a1a'`);
 
-          // Focus back to the main pane so the user stays in the lead session
+          // Focus back to the main pane
           execSync(`tmux select-pane -t '{top-left}'`);
         } catch { /* layout commands may vary by tmux version */ }
 

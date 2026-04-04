@@ -359,6 +359,7 @@ server.tool(
       `3. Execute the most recent task posted there by "${sessionName}"`,
       `4. When done, call brain_post to announce your results`,
       `5. Check brain_inbox for any follow-up messages`,
+      `6. IMPORTANT: When you are completely finished with all work, type /exit to close this session cleanly`,
     ].join('\n');
 
     // Write prompt to temp file to avoid shell escaping issues

@@ -491,18 +491,38 @@ server.tool(
   `Publish interface contracts for functions your module provides or expects from other modules.
 Call this AFTER writing/modifying a file to declare what it exports (provides),
 and BEFORE calling cross-module functions to declare what you need (expects).
-This lets the system catch param mismatches, missing functions, and type errors between agents.`,
+This lets the system catch param mismatches, missing functions, and type errors between agents.
+
+Two input shapes are accepted:
+  1. Single entry:  {module, name, kind, signature}
+  2. Batch:         {entries: [{module, name, kind, signature}, ...]}`,
   {
     entries: z.array(z.object({
-      module: z.string().describe('File path (e.g. "src/ui.ts", "src/engine.ts")'),
-      name: z.string().describe('Function or type name (e.g. "drawNameEntry", "Party")'),
-      kind: z.enum(['provides', 'expects']).describe('"provides" = your module exports this. "expects" = your module calls this from another module.'),
-      signature: z.string().describe('JSON signature: {"params": ["party: Party", "x: number"], "returns": "void"}'),
-    })).describe('Array of contract entries to publish'),
+      module: z.string(),
+      name: z.string(),
+      kind: z.enum(['provides', 'expects']),
+      signature: z.string(),
+    })).optional().describe('Array of contract entries to publish (for batch mode)'),
+    module: z.string().optional().describe('File path (single-entry mode, e.g. "src/ui.ts")'),
+    name: z.string().optional().describe('Function or type name (single-entry mode)'),
+    kind: z.enum(['provides', 'expects']).optional().describe('"provides" or "expects" (single-entry mode)'),
+    signature: z.string().optional().describe('JSON signature e.g. {"params":["party: Party"],"returns":"void"} (single-entry mode)'),
   },
-  async ({ entries }) => {
+  async ({ entries, module, name, kind, signature }) => {
     const sid = ensureSession();
-    const count = db.setContractBatch(entries, sid, sessionName, room);
+    const allEntries = entries ? [...entries] : [];
+    if (module && name && kind && signature) {
+      allEntries.push({ module, name, kind, signature });
+    }
+    if (allEntries.length === 0) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          ok: false,
+          error: 'Provide either a single {module,name,kind,signature} or entries:[...].',
+        }) }],
+      };
+    }
+    const count = db.setContractBatch(allEntries, sid, sessionName, room);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, published: count }) }],
     };
@@ -815,7 +835,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           (cliBase === 'claude' || cliBase.includes('claude')) ? 'claude' :
           (cliBase === 'hermes' || cliBase.includes('hermes')) ? 'hermes' :
           'other';
-        const toolPrefix = cliType === 'hermes' ? 'brain:' : '';
+        const toolPrefix = cliType === 'hermes' ? 'mcp_brain_' : '';
 
         // Build prompt
         const fileScope = agentCfg.files?.length
@@ -824,7 +844,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
 
         const prompt = [
           cliType === 'hermes'
-            ? 'You have brain MCP tools via the "brain" server (brain:brain_pulse, brain:brain_claim, brain:brain_release, brain:brain_post, brain:brain_contract_set, brain:brain_contract_get, brain:brain_contract_check, brain:brain_remember, brain:brain_recall).'
+            ? 'You have brain MCP tools via the "brain" server (mcp_brain_brain_pulse, mcp_brain_brain_claim, mcp_brain_brain_release, mcp_brain_brain_post, mcp_brain_brain_contract_set, mcp_brain_brain_contract_get, mcp_brain_brain_contract_check, mcp_brain_brain_remember, mcp_brain_brain_recall).'
             : 'You have brain MCP tools (brain_pulse, brain_claim, brain_release, brain_post, brain_contract_set, brain_contract_get, brain_contract_check, brain_remember, brain_recall).',
           fileScope,
           `Your name: "${agentName}"`,
@@ -1426,12 +1446,12 @@ server.tool(
     }
 
     // Hermes uses brain:tool_name notation for MCP tools
-    const toolPrefix = cliType === 'hermes' ? 'brain:' : '';
+    const toolPrefix = cliType === 'hermes' ? 'mcp_brain_' : '';
 
     // Build the prompt — adapted per CLI
     const prompt = [
       cliType === 'hermes'
-        ? `You have brain MCP tools available via the "brain" MCP server. Call them as: brain:brain_register, brain:brain_pulse, brain:brain_post, brain:brain_read, brain:brain_dm, brain:brain_inbox, brain:brain_set, brain:brain_get, brain:brain_claim, brain:brain_release, brain:brain_claims, brain:brain_agents, brain:brain_contract_set, brain:brain_contract_get, brain:brain_contract_check, brain:brain_remember, brain:brain_recall, brain:brain_plan_next, brain:brain_plan_update.`
+        ? `You have brain MCP tools available via the "brain" MCP server. Call them as: mcp_brain_brain_register, mcp_brain_brain_pulse, mcp_brain_brain_post, mcp_brain_brain_read, mcp_brain_brain_dm, mcp_brain_brain_inbox, mcp_brain_brain_set, mcp_brain_brain_get, mcp_brain_brain_claim, mcp_brain_brain_release, mcp_brain_brain_claims, mcp_brain_brain_agents, mcp_brain_brain_contract_set, mcp_brain_brain_contract_get, mcp_brain_brain_contract_check, mcp_brain_brain_remember, mcp_brain_brain_recall, mcp_brain_brain_plan_next, mcp_brain_brain_plan_update.`
         : 'You have brain MCP tools available (brain_register, brain_pulse, brain_sessions, brain_post, brain_read, brain_dm, brain_inbox, brain_set, brain_get, brain_claim, brain_release, brain_claims, brain_agents, brain_contract_set, brain_contract_get, brain_contract_check, brain_wake, brain_remember, brain_recall, brain_plan_next, brain_plan_update).',
       '',
       `IMPORTANT: Use ${toolPrefix}brain_claim before editing any file, and ${toolPrefix}brain_release when done. This prevents conflicts with other agents.`,

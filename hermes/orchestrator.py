@@ -241,14 +241,23 @@ class Orchestrator:
                 if proc and proc.poll() is not None:
                     sid = self._agent_ids[name]
                     # Process exited but agent didn't self-report via brain_pulse.
-                    # Trust the exit code: 0 = task completed successfully.
+                    # Exit code 0 alone is not enough — some hermes/model pairs
+                    # emit malformed tool calls that hermes silently ignores, so
+                    # the process exits cleanly without the agent doing anything.
+                    # Verify observable work (messages, DMs, or contracts) before
+                    # marking done.
                     health = next(
                         (a for a in agents if a.id == sid), None
                     )
                     if health and health.status not in ("done", "failed"):
                         if proc.returncode == 0:
-                            self.db.pulse(sid, "done", "process completed (exit 0)")
-                            results[name] = "done"
+                            did_work, summary = self._agent_produced_work(sid)
+                            if did_work:
+                                self.db.pulse(sid, "done", f"process completed (exit 0, {summary})")
+                                results[name] = "done"
+                            else:
+                                self.db.pulse(sid, "failed", "exit 0 but no observable work (no messages, DMs, or contracts)")
+                                results[name] = "failed"
                         else:
                             self.db.pulse(sid, "failed", f"process exited with code {proc.returncode}")
                             results[name] = "failed"
@@ -256,6 +265,37 @@ class Orchestrator:
             time.sleep(poll_interval)
 
         return results
+
+    # ── Work verification ──
+
+    def _agent_produced_work(self, sid: str) -> tuple[bool, str]:
+        """Check if an agent session has observable artifacts in brain.
+
+        Returns (did_work, summary). We check rows that persist beyond session
+        cleanup (messages, DMs, contracts) rather than claims (released on exit)
+        or session rows (deleted on exit).
+        """
+        conn = self.db.conn
+        msgs = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE sender_id=?", (sid,)
+        ).fetchone()[0]
+        dms = conn.execute(
+            "SELECT COUNT(*) FROM direct_messages WHERE from_id=?", (sid,)
+        ).fetchone()[0]
+        contracts = conn.execute(
+            "SELECT COUNT(*) FROM contracts WHERE agent_id=?", (sid,)
+        ).fetchone()[0]
+        total = msgs + dms + contracts
+        if total == 0:
+            return False, "nothing"
+        parts = []
+        if msgs:
+            parts.append(f"{msgs} msg")
+        if dms:
+            parts.append(f"{dms} dm")
+        if contracts:
+            parts.append(f"{contracts} contract")
+        return True, ", ".join(parts)
 
     # ── Integration gate ──
 

@@ -851,7 +851,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           headlessCmd = `cd ${sh(room)} && env ${childEnv} claude -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
         } else if (cliType === 'hermes') {
           const hermesModelEnv = agentModel ? `HERMES_MODEL=${sh(agentModel)}` : '';
-          headlessCmd = `cd ${sh(room)} && env ${childEnv} ${hermesModelEnv} hermes -q ${sh(prompt)} --quiet > ${sh(logFile)} 2>&1`;
+          headlessCmd = `cd ${sh(room)} && env ${childEnv} ${hermesModelEnv} hermes chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
         } else {
           headlessCmd = `cd ${sh(room)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
         }
@@ -1492,10 +1492,10 @@ server.tool(
           // claude -p (print mode) — non-interactive, uses all MCP tools, exits when done
           headlessCmd = `cd ${sh(room)} && env ${childEnv} ${sh(cliBase)} -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
         } else if (cliType === 'hermes') {
-          // hermes -q (single query mode) — non-interactive, uses MCP tools, exits when done
-          // --quiet suppresses TUI, only prints final response
+          // hermes chat -q (single query mode) — non-interactive, uses MCP tools, exits when done
+          // -Q suppresses TUI, only prints final response
           const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
-          headlessCmd = `cd ${sh(room)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} -q ${sh(prompt)} --quiet > ${sh(logFile)} 2>&1`;
+          headlessCmd = `cd ${sh(room)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
         } else {
           // Generic CLI — pass prompt via stdin
           headlessCmd = `cd ${sh(room)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;

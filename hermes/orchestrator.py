@@ -149,11 +149,11 @@ class Orchestrator:
         with open(prompt_file, "w") as f:
             f.write(prompt)
 
-        # Spawn hermes -q (non-interactive query mode)
+        # Spawn hermes chat -q (non-interactive query mode, -Q suppresses TUI)
         log_file = os.path.join(tempfile.gettempdir(), f"brain-agent-{agent_sid[:8]}.log")
         with open(log_file, "w") as log_f:
             proc = subprocess.Popen(
-                ["hermes", "-q", prompt, "--quiet"],
+                ["hermes", "chat", "-q", prompt, "-Q"],
                 cwd=self.cwd,
                 env=env,
                 stdout=log_f,
@@ -219,13 +219,18 @@ class Orchestrator:
                 proc = self._processes.get(name)
                 if proc and proc.poll() is not None:
                     sid = self._agent_ids[name]
-                    # Process exited but agent didn't report via brain
+                    # Process exited but agent didn't self-report via brain_pulse.
+                    # Trust the exit code: 0 = task completed successfully.
                     health = next(
                         (a for a in agents if a.id == sid), None
                     )
                     if health and health.status not in ("done", "failed"):
-                        self.db.pulse(sid, "failed", f"process exited with code {proc.returncode}")
-                        results[name] = "failed"
+                        if proc.returncode == 0:
+                            self.db.pulse(sid, "done", "process completed (exit 0)")
+                            results[name] = "done"
+                        else:
+                            self.db.pulse(sid, "failed", f"process exited with code {proc.returncode}")
+                            results[name] = "failed"
 
             time.sleep(poll_interval)
 

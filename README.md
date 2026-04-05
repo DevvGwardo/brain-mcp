@@ -50,6 +50,14 @@ hermes mcp list | grep brain
 hermes-brain --help
 ```
 
+**Sharing with friends?** Same one-liner above — it works anywhere Hermes runs (bare metal, WSL, or inside a Hermes Docker container). If they're running inside Docker, tell them to spawn agents with `layout: "headless"` since tmux panes can't render in a headless container:
+
+```python
+brain_wake({ task: "...", layout: "headless" })  # Docker-safe spawn
+```
+
+Each friend's brain is its own isolated SQLite DB — no network config, no shared state, fully self-contained.
+
 ---
 
 ## Quick Start

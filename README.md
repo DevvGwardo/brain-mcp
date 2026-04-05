@@ -2,22 +2,23 @@
 
 <br>
 
-# Brain MCP
+# Hermes Brain
 
-**Multi-agent orchestration for Claude Code**
+**Multi-agent orchestration for [Hermes Agent](https://github.com/NousResearch/hermes-agent)**
 
-Give your AI agents a shared brain. Communicate, coordinate, and spawn<br>parallel agents — all through a single MCP server backed by SQLite.
+Spawn parallel Hermes agents. Give them a shared brain. Ship in one command.<br>Backed by SQLite, coordinated by Python, zero tokens spent on coordination.
 
 <br>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-3DA639.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![Hermes](https://img.shields.io/badge/Hermes-Agent-FF6B6B)](https://github.com/NousResearch/hermes-agent)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-7C3AED)](https://modelcontextprotocol.io)
-[![GitHub Stars](https://img.shields.io/github/stars/DevvGwardo/brain-mcp?style=flat&logo=github)](https://github.com/DevvGwardo/brain-mcp)
 
 <br>
 
-[Install](#install) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Tools](#tools) · [Advanced](#advanced)
+[Install](#install) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [CLI](#the-hermes-brain-cli) · [Tools](#brain-tools) · [Advanced](#advanced)
 
 <br>
 
@@ -30,48 +31,64 @@ Give your AI agents a shared brain. Communicate, coordinate, and spawn<br>parall
 ```bash
 git clone https://github.com/DevvGwardo/brain-mcp.git ~/brain-mcp \
   && cd ~/brain-mcp \
-  && npm install \
-  && npm run build \
-  && ./install.sh
+  && ./setup-hermes.sh
 ```
 
-**Or manually:**
+The installer does three things:
+1. Builds the Node.js MCP server (`brain-mcp`)
+2. Installs the Python orchestration package (`hermes-brain`)
+3. Registers the brain as an MCP server in Hermes (and Claude Code if present)
 
-```bash
-claude mcp add brain -s user -- node ~/brain-mcp/dist/index.js
-```
+**Prerequisites:** [Hermes Agent](https://github.com/NousResearch/hermes-agent), Python 3.10+, Node.js 18+
 
 **Verify:**
 
 ```bash
-claude mcp list | grep brain
+hermes mcp list | grep brain
 # brain: node .../brain-mcp/dist/index.js - ✓ Connected
-```
 
-Restart Claude Code. Done.
+hermes-brain --help
+```
 
 ---
 
 ## Quick Start
 
-Open any project in Claude Code and say:
+**One command to orchestrate a fleet of Hermes agents:**
+
+```bash
+hermes-brain "Build a REST API with auth, users, and posts" \
+  --agents api-routes auth-layer db-models tests
+```
+
+What happens:
+1. Python conductor spawns 4 background Hermes agents (`hermes -q`)
+2. Each agent claims its files, publishes contracts, writes code, pulses heartbeats
+3. Conductor runs an **integration gate** — compiles the project, routes errors back to responsible agents via DM
+4. Agents self-correct. Gate retries until clean.
+5. Summary printed: agents, contracts, memories, metrics, done.
+
+**More ways to run it:**
+
+```bash
+# Auto-named agents
+hermes-brain "Add error handling to the whole codebase"
+
+# Mix models per task
+hermes-brain "Build a game" --agents engine ui store --model claude-sonnet-4-5
+
+# Cheap model for boilerplate
+hermes-brain "Generate 10 test files" --model claude-haiku-4-5
+
+# JSON pipeline with multiple phases
+hermes-brain --config pipeline.json
+```
+
+**Or from inside Hermes (interactive):**
 
 ```
-Refactor the API routes with 3 agents
-```
-
-That's it. Claude registers as lead, splits the work, spawns 3 agents in tmux panes, and coordinates through the brain.
-
-**More examples:**
-
-```
-Add error handling to the whole codebase with 4 agents
-```
-```
-Review this project in parallel with 2 agents
-```
-```
-Use brain_wake to spawn 6 agents that each improve a different module
+hermes> Use brain:brain_register, then brain:brain_wake to spawn 3 agents
+        that each refactor a different module.
 ```
 
 ---
@@ -80,57 +97,134 @@ Use brain_wake to spawn 6 agents that each improve a different module
 
 ```mermaid
 graph TB
-    subgraph "Your Terminal"
+    subgraph "Python Conductor"
+        CLI["hermes-brain CLI"]
+        ORCH["Orchestrator<br/><small>spawn · wait · gate · retry</small>"]
+    end
+
+    subgraph "Hermes Agents"
         direction LR
-        L["Lead Agent<br/><small>plans + coordinates</small>"]
-        W1["Worker 1<br/><small>hooks</small>"]
-        W2["Worker 2<br/><small>api</small>"]
-        W3["Worker 3<br/><small>components</small>"]
+        H1["Agent 1<br/><small>hermes -q</small>"]
+        H2["Agent 2<br/><small>hermes -q</small>"]
+        H3["Agent 3<br/><small>hermes -q</small>"]
     end
 
-    L -->|"brain_wake"| W1
-    L -->|"brain_wake"| W2
-    L -->|"brain_wake"| W3
+    CLI --> ORCH
+    ORCH -->|spawn| H1
+    ORCH -->|spawn| H2
+    ORCH -->|spawn| H3
 
-    subgraph "Brain"
-        DB[("SQLite")]
-        CH["Channels"]
-        KV["Shared State"]
+    subgraph "Brain (shared SQLite)"
+        DB[("brain.db")]
+        PULSE["Heartbeats"]
         MX["Mutex Locks"]
+        KV["Shared State"]
+        CON["Contracts"]
+        MEM["Memory"]
+        PLAN["Task DAG"]
     end
 
-    L <--> DB
-    W1 <--> DB
-    W2 <--> DB
-    W3 <--> DB
+    ORCH <--> DB
+    H1 <--> DB
+    H2 <--> DB
+    H3 <--> DB
 
-    style L fill:#9333EA,stroke:#7C3AED,color:#fff
-    style W1 fill:#3B82F6,stroke:#2563EB,color:#fff
-    style W2 fill:#10B981,stroke:#059669,color:#fff
-    style W3 fill:#F59E0B,stroke:#D97706,color:#000
+    subgraph "Integration Gate"
+        GATE["tsc · mypy · cargo · go vet"]
+        ROUTE["DM errors → agents"]
+    end
+
+    ORCH --> GATE
+    GATE --> ROUTE
+    ROUTE -.->|DM| H1
+    ROUTE -.->|DM| H2
+
+    style CLI fill:#9333EA,stroke:#7C3AED,color:#fff
+    style ORCH fill:#9333EA,stroke:#7C3AED,color:#fff
+    style H1 fill:#3B82F6,stroke:#2563EB,color:#fff
+    style H2 fill:#10B981,stroke:#059669,color:#fff
+    style H3 fill:#F59E0B,stroke:#D97706,color:#000
     style DB fill:#1E293B,stroke:#334155,color:#fff
-    style CH fill:#1E293B,stroke:#334155,color:#fff
-    style KV fill:#1E293B,stroke:#334155,color:#fff
-    style MX fill:#1E293B,stroke:#334155,color:#fff
+    style GATE fill:#EF4444,stroke:#DC2626,color:#fff
 ```
 
-Each Claude Code session spawns its own `brain-mcp` process via stdio. All processes share the same SQLite database with WAL mode for safe concurrent access. Sessions in the same directory auto-group into a room.
+**Zero-token coordination.** The conductor is pure Python — LLM tokens are only spent on the actual work. Heartbeats, claims, contracts, gates, retries all run locally.
 
-**No server to manage. No config per project. Just install once and use everywhere.**
+**No server to manage.** Each agent opens its own stdio connection to the brain. SQLite WAL mode handles concurrent access safely.
+
+**Same brain, any CLI.** Hermes, Claude Code, MiniMax — all clients hit the same SQLite DB. A mixed fleet of Hermes + Claude agents can coordinate on the same task.
 
 ---
 
-## Tools
+## The `hermes-brain` CLI
 
-16 tools across 6 categories.
+```bash
+hermes-brain <task> [options]
+```
 
-### Identity
+| Flag | Default | What it does |
+|:-----|:--------|:-------------|
+| `--agents <names...>` | `agent-1 agent-2` | Agent names to spawn in parallel |
+| `--model <id>` | `claude-sonnet-4-5` | Model passed to each agent |
+| `--no-gate` | off | Skip integration gate |
+| `--retries <n>` | `3` | Max gate retry attempts |
+| `--timeout <seconds>` | `600` | Per-agent timeout |
+| `--config <file.json>` | | Load a multi-phase pipeline |
+| `--db-path <path>` | `~/.claude/brain/brain.db` | Custom brain DB |
+
+### Pipeline config file
+
+```json
+{
+  "task": "Build a todo app",
+  "model": "claude-sonnet-4-5",
+  "gate": true,
+  "max_gate_retries": 3,
+  "phases": [
+    {
+      "name": "foundation",
+      "parallel": true,
+      "agents": [
+        { "name": "types",  "files": ["src/types/"], "task": "Define all TS types" },
+        { "name": "db",     "files": ["src/db/"],    "task": "Set up Prisma schema" }
+      ]
+    },
+    {
+      "name": "feature",
+      "parallel": true,
+      "agents": [
+        { "name": "api",    "files": ["src/api/"],   "task": "REST endpoints" },
+        { "name": "ui",     "files": ["src/ui/"],    "task": "React components" }
+      ]
+    },
+    {
+      "name": "quality",
+      "parallel": true,
+      "agents": [
+        { "name": "tests",  "task": "Write unit + integration tests" }
+      ]
+    }
+  ]
+}
+```
+
+Phases run sequentially. Agents within a phase run in parallel. The integration gate runs between phases.
+
+---
+
+## Brain Tools
+
+**30+ tools across 9 categories.** All available to Hermes, Claude Code, and any MCP-compatible agent.
+
+### Identity & Health
 
 | Tool | What it does |
 |:-----|:-------------|
 | `brain_register` | Name this session |
 | `brain_sessions` | List active sessions |
 | `brain_status` | Show session info + room |
+| `brain_pulse` | Heartbeat with status + progress (returns pending DMs) |
+| `brain_agents` | Live health of all agents (status, heartbeat age, claims) |
 
 ### Messaging
 
@@ -138,91 +232,168 @@ Each Claude Code session spawns its own `brain-mcp` process via stdio. All proce
 |:-----|:-------------|
 | `brain_post` | Post to a channel |
 | `brain_read` | Read from a channel |
-| `brain_dm` | Direct message another session |
+| `brain_dm` | Direct message another agent |
 | `brain_inbox` | Read your DMs |
 
-### Shared State
+### Shared State & Memory
 
 | Tool | What it does |
 |:-----|:-------------|
-| `brain_set` | Store a key-value pair |
-| `brain_get` | Read a value |
-| `brain_keys` | List all keys |
-| `brain_delete` | Remove a key |
+| `brain_set` / `brain_get` | Ephemeral key-value store |
+| `brain_keys` / `brain_delete` | List / remove keys |
+| `brain_remember` | Store persistent knowledge (survives `brain_clear`) |
+| `brain_recall` | Search memories from previous sessions |
+| `brain_forget` | Remove outdated memories |
 
-### Coordination
+### File Locking
 
 | Tool | What it does |
 |:-----|:-------------|
-| `brain_claim` | Lock a resource (mutex) |
-| `brain_release` | Unlock a resource |
-| `brain_claims` | List all locks |
+| `brain_claim` | Lock a file/resource (TTL-based mutex) |
+| `brain_release` | Unlock |
+| `brain_claims` | List active locks |
+
+### Contracts (prevents integration bugs)
+
+| Tool | What it does |
+|:-----|:-------------|
+| `brain_contract_set` | Publish what your module provides / expects |
+| `brain_contract_get` | Read other agents' contracts before coding |
+| `brain_contract_check` | Validate all contracts — catches param mismatches, missing functions |
+
+### Integration Gate
+
+| Tool | What it does |
+|:-----|:-------------|
+| `brain_gate` | Run compile + contract check, DM errors to responsible agents |
+| `brain_auto_gate` | Run gate in a loop, wait for fixes, retry until clean |
+
+### Task Planning (DAG)
+
+| Tool | What it does |
+|:-----|:-------------|
+| `brain_plan` | Create a task DAG with dependencies |
+| `brain_plan_next` | Get tasks whose dependencies are satisfied |
+| `brain_plan_update` | Mark task done/failed (auto-promotes dependents) |
+| `brain_plan_status` | Overall progress |
 
 ### Orchestration
 
 | Tool | What it does |
 |:-----|:-------------|
-| `brain_wake` | Spawn a new Claude Code session in tmux |
-| `brain_clear` | Reset all brain data |
+| `brain_wake` | Spawn a new agent (hermes, claude, or headless) |
+| `brain_swarm` | Spawn multiple agents in one call |
+| `brain_respawn` | Replace a failed agent with recovery context |
+| `brain_metrics` | Success rates, duration, error counts per agent |
+
+### Context Ledger (prevents losing track)
+
+| Tool | What it does |
+|:-----|:-------------|
+| `brain_context_push` | Log action/discovery/decision/error |
+| `brain_context_get` | Read the ledger |
+| `brain_context_summary` | Condensed view for context recovery |
+| `brain_checkpoint` | Save full working state |
+| `brain_checkpoint_restore` | Recover after context compression |
 
 ---
 
-## Agent Spawning
+## Heartbeat & Contract Protocol
 
-`brain_wake` opens a real interactive Claude Code session in a tmux split pane:
+Every spawned agent follows two protocols that the orchestrator enforces:
+
+**Heartbeat** — agents call `brain_pulse` every 2-3 tool calls with their status and a short progress note. The conductor uses this to:
+- Show live status in the terminal (`● working — editing src/api/routes.ts`)
+- Detect stalled agents (no pulse in 60s → `stale`)
+- Deliver pending DMs as pulse return values (no extra round-trip)
+
+**Contracts** — before agents write code, they call `brain_contract_get` to see what other agents export. After writing, they publish their own contract with `brain_contract_set`. Before marking done, `brain_contract_check` validates the whole fleet — catches:
+- Function signature mismatches (expected 2 args, got 3)
+- Missing exports (agent A imports `getUser` but agent B never exported it)
+- Type drift (expected `User`, got `{name, email}`)
+
+This is the key to matching single-agent integration quality with a parallel fleet.
+
+---
+
+## Integration Gate
 
 ```mermaid
 sequenceDiagram
-    participant L as Lead
-    participant B as Brain
-    participant W as Worker
+    participant O as Orchestrator
+    participant C as Compiler
+    participant DB as Brain DB
+    participant A as Agent
 
-    L->>B: brain_set("context", ...)
-    L->>B: brain_wake("worker", task)
-    B-->>W: Opens tmux pane
+    O->>C: Run tsc / mypy / cargo / go vet
+    C-->>O: Errors with file:line:message
 
-    W->>B: brain_register("worker")
-    W->>B: brain_claim("src/api/")
+    O->>DB: Query: who claimed this file?
+    DB-->>O: Agent X owned src/api/routes.ts
 
-    Note over W: Does the work
+    O->>A: DM: "Fix these errors in your files"
+    Note over A: Agent reads DM on next pulse
+    Note over A: Fixes code, pulses done
 
-    W->>B: brain_post("done")
-    W->>B: brain_release("src/api/")
-    W-->>W: Auto-exit
-
-    L->>B: brain_read()
-    Note over L: Sees results
+    O->>C: Re-run compiler
+    C-->>O: Clean
+    O->>DB: Record metrics
 ```
 
-**Layout options:**
+The gate auto-detects the project language and runs the appropriate checker:
 
-| Layout | View | Best for |
-|:-------|:-----|:---------|
-| `horizontal` | Side by side (default) | 2 agents |
-| `vertical` | Top / bottom | Full width |
-| `tiled` | Auto-grid | 3+ agents |
-| `window` | New tmux tab | Background |
+| Language | Checker |
+|:---------|:--------|
+| TypeScript | `npx tsc --noEmit` |
+| Python | `mypy` |
+| Rust | `cargo check` |
+| Go | `go vet` |
 
-**The lead pane** gets a purple tint and sits on the left at 45% width. Worker panes stack on the right, each with a unique colored border (blue, emerald, amber, red, violet, pink, cyan, orange, teal, purple).
+Errors are parsed, matched to the agent that claimed the failing file, and routed as a DM. Agents pick up their errors on the next pulse and self-correct. The loop retries up to `--retries` times before giving up.
 
 ---
 
-## Brain vs Built-in Teams
+## Mixed Fleets
 
-| | Claude Code Teams | Brain MCP |
-|:--|:--|:--|
-| **Visibility** | Hidden | Visible split panes |
-| **Communication** | None between agents | Channels, DMs, state |
-| **File safety** | Can conflict | Mutex locking |
-| **Persistence** | Dies with session | Survives restarts |
-| **Spawning** | Parent only | Any agent can spawn more |
-| **Independence** | Shared context | Fully standalone |
+The brain DB is shared across all MCP clients. A single project can have:
+
+```mermaid
+graph LR
+    subgraph "Fleet"
+        direction TB
+        HA["Hermes Agent<br/><small>fast local inference</small>"]
+        CC["Claude Code<br/><small>deep reasoning</small>"]
+        MM["MiniMax<br/><small>cheap boilerplate</small>"]
+    end
+
+    subgraph "Brain"
+        DB[("brain.db")]
+    end
+
+    HA <--> DB
+    CC <--> DB
+    MM <--> DB
+
+    style HA fill:#F59E0B,stroke:#D97706,color:#000
+    style CC fill:#9333EA,stroke:#7C3AED,color:#fff
+    style MM fill:#3B82F6,stroke:#2563EB,color:#fff
+    style DB fill:#1E293B,stroke:#334155,color:#fff
+```
+
+Route by task type. Use Hermes for routine work, Claude for architectural decisions, cheaper models for boilerplate — all coordinating through the same brain, sharing contracts, gates, memory.
+
+From Claude Code:
+
+```
+brain_wake({ task: "...", cli: "hermes", layout: "headless" })
+brain_wake({ task: "...", cli: "claude", layout: "horizontal" })
+```
 
 ---
 
 # Advanced
 
-Everything below covers the full technical depth of Brain MCP.
+Everything below covers the full technical depth.
 
 ---
 
@@ -230,221 +401,113 @@ Everything below covers the full technical depth of Brain MCP.
 
 ```mermaid
 graph TB
-    subgraph "Claude Code Sessions"
-        S1["Session 1<br/><small>PID 1234</small>"]
-        S2["Session 2<br/><small>PID 1235</small>"]
-        S3["Session 3<br/><small>PID 1236</small>"]
+    subgraph "MCP Clients"
+        HA["hermes sessions"]
+        CC["claude sessions"]
+        PY["Python orchestrator"]
     end
 
     subgraph "MCP Layer"
-        M1["brain-mcp<br/><small>stdio</small>"]
-        M2["brain-mcp<br/><small>stdio</small>"]
-        M3["brain-mcp<br/><small>stdio</small>"]
+        M1["brain-mcp<br/><small>stdio server</small>"]
     end
 
-    S1 --- M1
-    S2 --- M2
-    S3 --- M3
+    subgraph "Python API"
+        PYDB["hermes.db.BrainDB<br/><small>direct SQLite access</small>"]
+    end
 
     subgraph "Storage"
-        DB[("brain.db<br/><small>SQLite WAL</small>")]
+        DB[("~/.claude/brain/brain.db<br/><small>SQLite WAL</small>")]
     end
 
+    HA --> M1
+    CC --> M1
+    PY --> PYDB
     M1 --> DB
-    M2 --> DB
-    M3 --> DB
+    PYDB --> DB
 
-    subgraph "Database Tables"
-        T1["sessions<br/><small>id, name, room, heartbeat</small>"]
-        T2["messages<br/><small>channel, room, sender, content</small>"]
-        T3["direct_messages<br/><small>from, to, content</small>"]
-        T4["state<br/><small>key, scope, value</small>"]
-        T5["claims<br/><small>resource, owner, ttl</small>"]
+    subgraph "Tables"
+        T1["sessions · messages · dms"]
+        T2["state · claims · contracts"]
+        T3["memory · plans · metrics"]
+        T4["context_ledger · checkpoints"]
     end
 
     DB --- T1
     DB --- T2
     DB --- T3
     DB --- T4
-    DB --- T5
 
-    style S1 fill:#9333EA,stroke:#7C3AED,color:#fff
-    style S2 fill:#3B82F6,stroke:#2563EB,color:#fff
-    style S3 fill:#10B981,stroke:#059669,color:#fff
-    style DB fill:#F59E0B,stroke:#D97706,color:#000
-    style T1 fill:#1E293B,stroke:#475569,color:#94A3B8
-    style T2 fill:#1E293B,stroke:#475569,color:#94A3B8
-    style T3 fill:#1E293B,stroke:#475569,color:#94A3B8
-    style T4 fill:#1E293B,stroke:#475569,color:#94A3B8
-    style T5 fill:#1E293B,stroke:#475569,color:#94A3B8
+    style HA fill:#F59E0B,stroke:#D97706,color:#000
+    style CC fill:#9333EA,stroke:#7C3AED,color:#fff
+    style PY fill:#3776AB,stroke:#2C5F8D,color:#fff
+    style DB fill:#10B981,stroke:#059669,color:#fff
 ```
 
-**Key design decisions:**
+**Design decisions:**
 
-- **One process per session**: Each Claude Code session spawns its own `brain-mcp` process. No shared long-running server.
-- **SQLite WAL mode**: Multiple processes can read simultaneously. Writes are serialized with a 5-second busy timeout.
-- **Heartbeat cleanup**: Sessions that haven't pinged in 5 minutes are considered dead and excluded from listings.
-- **Room scoping**: The working directory is the default room. Sessions in the same directory see each other's messages and state.
+- **Dual access paths** — Agents use MCP (stdio) via `brain-mcp`. The Python orchestrator uses `hermes.db.BrainDB` for direct, fast access to the same SQLite file.
+- **One process per session** — No long-running daemon. Each agent opens its own stdio.
+- **WAL mode + 5s busy timeout** — Multiple writers serialize safely.
+- **Heartbeat-based liveness** — Agents dead in 60s = stale, dead in 5m = cleaned up.
+- **Room scoping** — Working directory is the default room. Override with `BRAIN_ROOM`.
 
 ---
 
-## Scoping Model
-
-```mermaid
-graph LR
-    subgraph "Room: ~/project-a"
-        A1["Session A1"]
-        A2["Session A2"]
-    end
-
-    subgraph "Room: ~/project-b"
-        B1["Session B1"]
-    end
-
-    subgraph "Brain DB"
-        CH_A["#general<br/><small>room: project-a</small>"]
-        CH_B["#general<br/><small>room: project-b</small>"]
-        DM["Direct Messages<br/><small>cross-room</small>"]
-        GS["Global State<br/><small>scope: global</small>"]
-    end
-
-    A1 <--> CH_A
-    A2 <--> CH_A
-    B1 <--> CH_B
-    A1 <-.->|DM| B1
-    A1 <-.-> GS
-    B1 <-.-> GS
-
-    style A1 fill:#3B82F6,stroke:#2563EB,color:#fff
-    style A2 fill:#3B82F6,stroke:#2563EB,color:#fff
-    style B1 fill:#10B981,stroke:#059669,color:#fff
-```
-
-| Scope | How it works |
-|:------|:-------------|
-| **Room** | Sessions in the same `cwd` share channels and state by default |
-| **Channels** | Named streams within a room (e.g. `general`, `tasks`) |
-| **DMs** | Cross-room direct messages between any two sessions |
-| **Global state** | Use `scope: "global"` in `brain_set`/`brain_get` for cross-room data |
-
----
-
-## Spawned Agent Lifecycle
+## Spawned Agent Lifecycle (Hermes Headless)
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Spawning: brain_wake called
+    [*] --> Spawned: hermes -q &
+    Spawned --> Initializing: MCP connected
+    Initializing --> Registered: brain_register
+    Registered --> ReadingContext: brain_get / brain_recall
+    ReadingContext --> CheckingContracts: brain_contract_get
 
-    Spawning --> Initializing: tmux pane created
-    Initializing --> WaitingForReady: Claude Code loading
-
-    state "Ready Detection" as Ready {
-        WaitingForReady --> CheckPane: poll every 2s
-        CheckPane --> PromptDetected: status bar text found
-        CheckPane --> WaitingForReady: not ready yet
-        CheckPane --> FallbackWait: 60 attempts
-        FallbackWait --> PromptDetected: 15s flat sleep
+    state "Working Loop" as Loop {
+        CheckingContracts --> Claiming: brain_claim files
+        Claiming --> Editing: make changes
+        Editing --> Pulsing: brain_pulse (every 2-3 calls)
+        Pulsing --> ReadingDMs: DMs returned in pulse
+        ReadingDMs --> Editing: fix errors if any
+        Editing --> Publishing: brain_contract_set
     }
 
-    PromptDetected --> PromptPasted: tmux paste-buffer
-    PromptPasted --> Working: Agent executes task
-
-    state "Working" as Working {
-        [*] --> ReadingBrain: brain_get context
-        ReadingBrain --> ClaimingFiles: brain_claim
-        ClaimingFiles --> Editing: make changes
-        Editing --> ReleasingFiles: brain_release
-        ReleasingFiles --> PostingResults: brain_post
-    }
-
-    Working --> Idle: Task complete
-
-    state "Auto-Exit Detection" as AutoExit {
-        Idle --> HashCheck: content hash every 5s
-        HashCheck --> StableCount: hash unchanged
-        StableCount --> HashCheck: count < 3
-        StableCount --> SendExit: 3 consecutive (15s stable)
-    }
-
-    SendExit --> ExitSent: /exit sent to pane
-    ExitSent --> PaneClosed: Claude exits
-    PaneClosed --> ForceKill: still alive after 5s
-    ExitSent --> [*]: pane closed
-    ForceKill --> [*]: tmux kill-pane
+    Publishing --> FinalCheck: brain_contract_check
+    FinalCheck --> Publishing: mismatches found
+    FinalCheck --> Done: clean
+    Done --> Releasing: brain_release all files
+    Releasing --> Reporting: brain_pulse status=done
+    Reporting --> Exited: process ends
+    Exited --> [*]
 ```
-
-**Three phases:**
-
-1. **Ready detection** — Polls the tmux pane every 2 seconds looking for Claude Code's status bar. Falls back to a 15-second flat wait.
-2. **Prompt injection** — Uses `tmux load-buffer` + `tmux paste-buffer` to send the task prompt to the interactive session.
-3. **Auto-exit** — Hashes pane content every 5 seconds. When unchanged for 15 seconds (3 checks), sends `/exit`. Force-kills if still alive after 5 more seconds.
 
 ---
 
-## Conflict Prevention
+## Auto-Recovery
+
+If an agent crashes or goes stale, the orchestrator spawns a replacement with full context:
 
 ```mermaid
 sequenceDiagram
-    participant A as Agent A
-    participant B as Brain DB
-    participant C as Agent C
+    participant O as Orchestrator
+    participant DB as Brain DB
+    participant R as Replacement
 
-    Note over A,C: Both want to edit src/api/routes.ts
+    Note over O,DB: Agent X went stale (no pulse 60s+)
 
-    A->>B: brain_claim("src/api/routes.ts")
-    B-->>A: { claimed: true }
+    O->>DB: Get X's progress, claims, messages
+    DB-->>O: "was editing src/api; claimed 3 files"
 
-    C->>B: brain_claim("src/api/routes.ts")
-    B-->>C: { claimed: false, owner: "Agent A" }
+    O->>DB: Release X's claims
+    O->>DB: Record failure metric
 
-    Note over C: Skips file, works on something else
+    O->>R: Spawn "X-r4521" with recovery prompt:
+    Note over R: "You're replacing X.<br/>Last progress: 'editing routes.ts'.<br/>Pick up where they left off."
 
-    A->>B: brain_release("src/api/routes.ts")
-
-    C->>B: brain_claim("src/api/routes.ts")
-    B-->>C: { claimed: true }
+    R->>DB: brain_register, brain_claim, continue
 ```
 
-**Two layers of protection:**
-
-1. **Planning layer** — The lead agent assigns non-overlapping files to each worker
-2. **Runtime layer** — `brain_claim` is an atomic mutex. The second claimer gets `{ claimed: false, owner: "..." }` and must skip or wait
-
-**TTL safety net**: `brain_claim("file", ttl=300)` auto-releases after 5 minutes, preventing zombie locks from crashed agents.
-
----
-
-## Tmux Layout Engine
-
-```mermaid
-graph TB
-    subgraph "main-vertical layout"
-        direction LR
-        subgraph "Left 45%"
-            Lead["LEAD<br/><small>purple tint</small><br/><small>bright border</small>"]
-        end
-        subgraph "Right 55%"
-            W1["Worker 1<br/><small>blue border</small>"]
-            W2["Worker 2<br/><small>emerald border</small>"]
-            W3["Worker 3<br/><small>amber border</small>"]
-            W4["Worker 4<br/><small>red border</small>"]
-        end
-    end
-
-    style Lead fill:#0d0a1a,stroke:#9333EA,color:#fff,stroke-width:3px
-    style W1 fill:#0F172A,stroke:#3B82F6,color:#fff
-    style W2 fill:#0F172A,stroke:#10B981,color:#fff
-    style W3 fill:#0F172A,stroke:#F59E0B,color:#fff
-    style W4 fill:#0F172A,stroke:#EF4444,color:#fff
-```
-
-**10 agent colors** (cycling): blue, emerald, amber, red, violet, pink, cyan, orange, teal, purple
-
-**Layout auto-selection:**
-- Default: `main-vertical` — lead on left, workers stacked right
-- `tiled`: even grid for 3+ agents
-- `horizontal` / `vertical`: simple 2-pane splits
-- `window`: separate tmux tab
+The replacement inherits the original task, knows what files the failed agent touched, and has context about their last known progress.
 
 ---
 
@@ -452,65 +515,29 @@ graph TB
 
 ```mermaid
 erDiagram
-    sessions {
-        text id PK
-        text name
-        int pid
-        text cwd
-        text room
-        text metadata
-        text created_at
-        text last_heartbeat
-    }
-
-    messages {
-        int id PK
-        text channel
-        text room
-        text sender_id FK
-        text sender_name
-        text content
-        text metadata
-        text created_at
-    }
-
-    direct_messages {
-        int id PK
-        text from_id FK
-        text from_name
-        text to_id FK
-        text content
-        text metadata
-        text created_at
-    }
-
-    state {
-        text key PK
-        text scope PK
-        text value
-        text updated_by FK
-        text updated_by_name
-        text updated_at
-    }
-
-    claims {
-        text resource PK
-        text owner_id FK
-        text owner_name
-        text room
-        text expires_at
-        text claimed_at
-    }
-
     sessions ||--o{ messages : sends
     sessions ||--o{ direct_messages : sends
-    sessions ||--o{ state : updates
     sessions ||--o{ claims : owns
+    sessions ||--o{ contracts : publishes
+    sessions ||--o{ pulses : heartbeats
+    sessions ||--o{ context_ledger : logs
+    sessions ||--o{ checkpoints : saves
+    sessions ||--o{ metrics : records
+
+    sessions { text id PK text name text room text status text progress text last_heartbeat }
+    messages { int id PK text channel text room text sender content text created_at }
+    direct_messages { int id PK text from_id text to_id text content bool read }
+    state { text key PK text scope text value text updated_by }
+    claims { text resource PK text owner_id text expires_at }
+    contracts { text module PK text agent_id json provides json expects }
+    memory { text id PK text room text topic text content text tags }
+    plans { text id PK text room json tasks json dependencies }
+    metrics { int id PK text agent_name text outcome int duration_ms }
+    context_ledger { int id PK text agent_id text entry_type text content text file_path }
+    checkpoints { text id PK text agent_id json working_state text summary }
 ```
 
-**Database location**: `~/.claude/brain/brain.db`
-
-**Indexes**: channel+room+id on messages, to_id+id on DMs, room on sessions
+**Database location:** `~/.claude/brain/brain.db`
 
 ---
 
@@ -519,47 +546,89 @@ erDiagram
 | Variable | Default | Description |
 |:---------|:--------|:------------|
 | `BRAIN_SESSION_NAME` | `session-{pid}` | Pre-set session name |
+| `BRAIN_SESSION_ID` | uuid | Pre-set session id (used by orchestrator) |
 | `BRAIN_ROOM` | Working directory | Override room grouping |
 | `BRAIN_DB_PATH` | `~/.claude/brain/brain.db` | Custom database path |
+| `BRAIN_DEFAULT_CLI` | `claude` | Default CLI for `brain_wake` (`hermes`/`claude`) |
+| `HERMES_MODEL` | | Model passed to spawned hermes agents |
 
 ---
 
-## CLAUDE.md Integration
+## Using Brain Tools Directly From Hermes
 
-Add to your project's `CLAUDE.md` for automatic orchestration:
+If you don't want the Python CLI, you can orchestrate directly from inside a Hermes session:
 
-```markdown
-## Brain MCP
-
-When the user asks for parallel agents, multi-agent work, or swarm:
-1. brain_register as "lead"
-2. Split work across agents with non-overlapping files
-3. brain_set shared context
-4. brain_wake each agent
-5. Monitor with brain_read
-6. brain_claim before editing, brain_release after
 ```
+hermes> brain:brain_register with name "lead"
+hermes> brain:brain_set key="task" value="refactor auth" scope="room"
+hermes> brain:brain_wake name="worker-1" task="..." cli="hermes" layout="headless"
+hermes> brain:brain_wake name="worker-2" task="..." cli="hermes" layout="headless"
+hermes> brain:brain_agents        # monitor health
+hermes> brain:brain_auto_gate     # run gate loop until clean
+```
+
+The tools work identically in interactive mode, headless mode, and across mixed fleets.
 
 ---
 
-## Companion: Brain Swarm
+## Claude Code (Visible tmux Panes)
 
-[Brain Swarm](https://github.com/DevvGwardo/brain-swarm) adds predefined team templates on top of Brain MCP:
+Brain also supports spawning Claude Code sessions in tmux split panes for visual orchestration:
 
+```mermaid
+graph TB
+    subgraph "Your terminal"
+        direction LR
+        L["LEAD<br/><small>purple border</small>"]
+        W1["worker 1<br/><small>blue</small>"]
+        W2["worker 2<br/><small>emerald</small>"]
+        W3["worker 3<br/><small>amber</small>"]
+    end
+    L -->|brain_wake| W1
+    L -->|brain_wake| W2
+    L -->|brain_wake| W3
+
+    style L fill:#0d0a1a,stroke:#9333EA,color:#fff,stroke-width:3px
+    style W1 fill:#0F172A,stroke:#3B82F6,color:#fff
+    style W2 fill:#0F172A,stroke:#10B981,color:#fff
+    style W3 fill:#0F172A,stroke:#F59E0B,color:#fff
 ```
-Swarm this codebase with the dev team
-```
 
-Spawns a 6-agent pipeline: planner, backend-dev, frontend-dev, tester, reviewer, deployer.
+From Claude Code, say *"Refactor the API with 3 agents"* — the lead splits the work, spawns 3 Claude sessions in tmux panes, each with a unique colored border, and coordinates through the brain.
+
+**Layouts:** `headless` (Hermes default), `horizontal`, `vertical`, `tiled`, `window`
 
 ---
 
 ## Development
 
 ```bash
-npm run dev     # Watch mode
-npm run build   # Compile
-npm start       # Run server
+# Node.js MCP server
+npm run dev          # watch mode
+npm run build        # compile TypeScript
+npm start            # run server
+
+# Python orchestrator
+pip install -e .     # install hermes-brain
+python -m hermes.cli "task" --agents a b c
+```
+
+**Repo layout:**
+```
+brain-mcp/
+├── src/                  # TypeScript MCP server (brain-mcp)
+│   ├── index.ts          # Tool definitions (30+ tools)
+│   ├── db.ts             # SQLite layer
+│   ├── conductor.ts      # brain_wake / brain_swarm logic
+│   └── gate.ts           # Integration gate
+├── hermes/               # Python orchestration (hermes-brain)
+│   ├── cli.py            # hermes-brain CLI entry point
+│   ├── orchestrator.py   # Conductor — spawn, wait, gate, retry
+│   ├── db.py             # Direct SQLite access (shares brain.db)
+│   ├── gate.py           # Compiler + contract checks
+│   └── prompt.py         # Agent prompt templates
+├── setup-hermes.sh       # Full installer
+└── pyproject.toml        # Python package config
 ```
 
 ---
@@ -568,7 +637,7 @@ npm start       # Run server
 
 <br>
 
-Node.js 18+ &nbsp;&middot;&nbsp; Claude Code &nbsp;&middot;&nbsp; tmux &nbsp;&middot;&nbsp; [MCP Protocol](https://modelcontextprotocol.io)
+Python 3.10+ &nbsp;&middot;&nbsp; Node.js 18+ &nbsp;&middot;&nbsp; [Hermes Agent](https://github.com/NousResearch/hermes-agent) &nbsp;&middot;&nbsp; [MCP Protocol](https://modelcontextprotocol.io)
 
 [MIT License](LICENSE)
 

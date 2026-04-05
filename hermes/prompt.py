@@ -19,6 +19,10 @@ brain:brain_release, brain:brain_claims, brain:brain_agents, brain:brain_contrac
 brain:brain_contract_get, brain:brain_contract_check, brain:brain_remember, brain:brain_recall,
 brain:brain_plan_next, brain:brain_plan_update.
 
+STEP 0 — DO THIS FIRST, BEFORE ANY OTHER TOOL CALL:
+Call brain:brain_register with name="{agent_name}" — the orchestrator is waiting
+to track you under that exact name. Do not pick a different name. Do not skip this step.
+
 IMPORTANT: Use brain:brain_claim before editing any file, and brain:brain_release when done.
 
 Your name: "{agent_name}"

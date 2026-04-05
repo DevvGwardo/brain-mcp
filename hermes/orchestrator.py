@@ -188,6 +188,27 @@ class Orchestrator:
                 sid = self._agent_ids.get(name)
                 if not sid:
                     continue
+
+                # Hermes doesn't propagate BRAIN_SESSION_ID to MCP subprocesses,
+                # so the spawned agent creates its own session via brain_register.
+                # Discover the real session by name and switch tracking to it,
+                # removing the pre-registered zombie row.
+                real_agent = next(
+                    (a for a in agents
+                     if a.name == name
+                     and a.id != sid
+                     and a.id != self.conductor_id),
+                    None,
+                )
+                if real_agent:
+                    try:
+                        self.db.remove_session(sid)
+                    except Exception:
+                        pass
+                    self._agent_ids[name] = real_agent.id
+                    sid = real_agent.id
+                    agents = self.db.get_agent_health(self.cwd)
+
                 agent = next((a for a in agents if a.id == sid), None)
                 if not agent:
                     continue

@@ -11,6 +11,38 @@ import { randomUUID } from 'node:crypto';
 import { BrainDB } from './db.js';
 import { runGate, runGateAndNotify } from './gate.js';
 
+// ── Schema helpers (string-coercion for transports that stringify params) ──
+// Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
+// a string. z.number() / z.boolean() / z.array() reject those with
+// "Expected X, received string". These helpers accept native types OR
+// stringified versions and normalize before validation.
+const cNum = () => z.preprocess(
+  (v) => typeof v === 'string' && v.trim() !== '' ? Number(v) : v,
+  z.number(),
+);
+const cBool = () => z.preprocess(
+  (v) => {
+    if (typeof v !== 'string') return v;
+    const s = v.toLowerCase().trim();
+    if (s === 'true' || s === '1' || s === 'yes') return true;
+    if (s === 'false' || s === '0' || s === 'no' || s === '') return false;
+    return v; // let z.boolean() raise the error with the original value
+  },
+  z.boolean(),
+);
+const cArr = <T extends z.ZodTypeAny>(item: T) => z.preprocess(
+  (v) => {
+    if (typeof v !== 'string') return v;
+    try {
+      const parsed = JSON.parse(v);
+      return Array.isArray(parsed) ? parsed : v;
+    } catch {
+      return v;
+    }
+  },
+  z.array(item),
+);
+
 // ── Initialize ──
 
 const db = new BrainDB(process.env.BRAIN_DB_PATH);
@@ -180,7 +212,7 @@ server.tool(
   'brain_sessions',
   'List all active sessions. See who else is connected and their session IDs for DMs.',
   {
-    all_rooms: z.boolean().optional().describe('Show sessions from ALL rooms, not just the current working directory'),
+    all_rooms: cBool().optional().describe('Show sessions from ALL rooms, not just the current working directory'),
   },
   async ({ all_rooms }) => {
     ensureSession();
@@ -250,7 +282,7 @@ server.tool(
   'brain_agents',
   'Check health of all agents in the room. Shows status, last heartbeat age, progress, and held claims. Use this to monitor spawned agents.',
   {
-    include_stale: z.boolean().optional().describe('Include agents that stopped heartbeating (default: true)'),
+    include_stale: cBool().optional().describe('Include agents that stopped heartbeating (default: true)'),
   },
   async ({ include_stale }) => {
     ensureSession();
@@ -296,8 +328,8 @@ server.tool(
   'Read messages from a channel. Use since_id to poll for only new messages since your last read.',
   {
     channel: z.string().optional().describe('Channel name (default: "general")'),
-    since_id: z.number().optional().describe('Only return messages with ID greater than this (for polling)'),
-    limit: z.number().optional().describe('Max messages to return (default: 50)'),
+    since_id: cNum().optional().describe('Only return messages with ID greater than this (for polling)'),
+    limit: cNum().optional().describe('Max messages to return (default: 50)'),
   },
   async ({ channel, since_id, limit }) => {
     ensureSession();
@@ -337,7 +369,7 @@ server.tool(
   'brain_inbox',
   'Read direct messages sent to or from this session. Use since_id for polling.',
   {
-    since_id: z.number().optional().describe('Only return messages with ID greater than this'),
+    since_id: cNum().optional().describe('Only return messages with ID greater than this'),
   },
   async ({ since_id }) => {
     const sid = ensureSession();
@@ -441,7 +473,7 @@ server.tool(
   'Claim exclusive access to a resource (file, task, etc.). Prevents other sessions from claiming it. Use TTL for auto-release.',
   {
     resource: z.string().describe('Resource identifier (e.g. file path, task name, "src/api/routes.ts")'),
-    ttl: z.number().optional().describe('Auto-release after this many seconds (prevents zombie claims)'),
+    ttl: cNum().optional().describe('Auto-release after this many seconds (prevents zombie claims)'),
   },
   async ({ resource, ttl }) => {
     const sid = ensureSession();
@@ -471,7 +503,7 @@ server.tool(
   'brain_claims',
   'List all active resource claims. See what resources are locked and by whom.',
   {
-    current_room: z.boolean().optional().describe('Only show claims in the current room'),
+    current_room: cBool().optional().describe('Only show claims in the current room'),
   },
   async ({ current_room }) => {
     ensureSession();
@@ -497,7 +529,7 @@ Two input shapes are accepted:
   1. Single entry:  {module, name, kind, signature}
   2. Batch:         {entries: [{module, name, kind, signature}, ...]}`,
   {
-    entries: z.array(z.object({
+    entries: cArr(z.object({
       module: z.string(),
       name: z.string(),
       kind: z.enum(['provides', 'expects']),
@@ -578,8 +610,8 @@ Catches type errors, missing imports, param mismatches between agents.
 If errors are found, DMs each responsible agent with their specific errors and resets their status to "working".
 Use this after all agents report "done" to verify integration before shipping.`,
   {
-    notify: z.boolean().optional().describe('DM agents with their errors and reset status to working (default: true)'),
-    dry_run: z.boolean().optional().describe('Just check, don\'t DM agents (default: false)'),
+    notify: cBool().optional().describe('DM agents with their errors and reset status to working (default: true)'),
+    dry_run: cBool().optional().describe('Just check, don\'t DM agents (default: false)'),
   },
   async ({ notify, dry_run }) => {
     const sid = ensureSession();
@@ -607,7 +639,7 @@ server.tool(
   'brain_clear',
   'Clear all brain data — messages, state, claims, contracts, sessions. Use this to reset the brain for a fresh start.',
   {
-    confirm: z.boolean().describe('Must be true to confirm the clear operation'),
+    confirm: cBool().describe('Must be true to confirm the clear operation'),
   },
   async ({ confirm }) => {
     if (!confirm) {
@@ -636,7 +668,7 @@ Call this after every significant action — it's cheap and saves you from losin
     summary: z.string().describe('One-line summary of what happened (e.g. "Added error handling to deploy route", "Found that auth middleware requires session token")'),
     detail: z.string().optional().describe('Full detail — code snippets, reasoning, exact changes. Be verbose here, this is your recovery insurance.'),
     file_path: z.string().optional().describe('Relevant file path (e.g. "src/app/api/deploy/route.ts")'),
-    tags: z.array(z.string()).optional().describe('Tags for filtering (e.g. ["error-handling", "api", "deploy"])'),
+    tags: cArr(z.string()).optional().describe('Tags for filtering (e.g. ["error-handling", "api", "deploy"])'),
   },
   async ({ entry_type, summary, detail, file_path, tags }) => {
     const sid = ensureSession();
@@ -656,8 +688,8 @@ Filter by type, file, or session to get exactly what you need.`,
     entry_type: z.enum(['action', 'discovery', 'decision', 'error', 'file_change', 'checkpoint']).optional().describe('Filter by entry type'),
     file_path: z.string().optional().describe('Filter by file path'),
     session_id: z.string().optional().describe('Filter by session (default: all sessions in room)'),
-    since_id: z.number().optional().describe('Only entries after this ID'),
-    limit: z.number().optional().describe('Max entries to return (default: 50)'),
+    since_id: cNum().optional().describe('Only entries after this ID'),
+    limit: cNum().optional().describe('Max entries to return (default: 50)'),
   },
   async ({ entry_type, file_path, session_id, since_id, limit }) => {
     ensureSession();
@@ -713,11 +745,11 @@ context loss. Call this every 10-15 tool calls, or before starting a complex sub
 If you later lose track of what you're doing, brain_checkpoint_restore brings it all back.`,
   {
     current_task: z.string().describe('What you are currently working on'),
-    files_touched: z.array(z.string()).describe('Files you have read or modified so far'),
-    decisions: z.array(z.string()).describe('Key decisions you have made (e.g. "Using try/catch wrapper pattern", "Keeping existing validation logic")'),
+    files_touched: cArr(z.string()).describe('Files you have read or modified so far'),
+    decisions: cArr(z.string()).describe('Key decisions you have made (e.g. "Using try/catch wrapper pattern", "Keeping existing validation logic")'),
     progress_summary: z.string().describe('Where you are in the overall task (e.g. "3/7 routes done, deploy and instances complete, chat routes next")'),
-    blockers: z.array(z.string()).optional().describe('Anything blocking progress'),
-    next_steps: z.array(z.string()).describe('What you plan to do next, in order'),
+    blockers: cArr(z.string()).optional().describe('Anything blocking progress'),
+    next_steps: cArr(z.string()).describe('What you plan to do next, in order'),
   },
   async ({ current_task, files_touched, decisions, progress_summary, blockers, next_steps }) => {
     const sid = ensureSession();
@@ -783,10 +815,10 @@ Automatically: registers as lead, creates a task plan, spawns all agents, starts
 Use brain_agents to monitor, brain_auto_gate when done.`,
   {
     task: z.string().describe('The overall task to accomplish'),
-    agents: z.array(z.object({
+    agents: cArr(z.object({
       name: z.string().describe('Agent name (e.g. "api-worker", "test-writer")'),
       task: z.string().describe('Specific task for this agent'),
-      files: z.array(z.string()).optional().describe('Files this agent is responsible for'),
+      files: cArr(z.string()).optional().describe('Files this agent is responsible for'),
       model: z.string().optional().describe('Model override for this agent'),
     })).describe('Array of agents to spawn'),
     layout: z.enum(['horizontal', 'tiled', 'headless']).optional().describe('Layout for all agents (default: headless)'),
@@ -944,7 +976,7 @@ Always check memory at the start of a task — previous agents may have discover
   {
     query: z.string().optional().describe('Search term to match against key and content (optional — omit to list all)'),
     category: z.string().optional().describe('Filter by category'),
-    limit: z.number().optional().describe('Max results (default: 20)'),
+    limit: cNum().optional().describe('Max results (default: 20)'),
   },
   async ({ query, category, limit }) => {
     ensureSession();
@@ -996,10 +1028,10 @@ server.tool(
 when all its dependencies are done. Use this instead of naively splitting work by files.
 Example: types → implementation → tests (each stage depends on the previous).`,
   {
-    tasks: z.array(z.object({
+    tasks: cArr(z.object({
       name: z.string().describe('Unique task name (e.g. "define-types", "implement-api", "write-tests")'),
       description: z.string().describe('What this task should accomplish'),
-      depends_on: z.array(z.string()).optional().describe('Names of tasks that must complete before this one can start'),
+      depends_on: cArr(z.string()).optional().describe('Names of tasks that must complete before this one can start'),
       agent_name: z.string().optional().describe('Preferred agent name to assign this task to'),
     })).describe('Array of tasks with optional dependencies'),
   },
@@ -1208,8 +1240,8 @@ server.tool(
 After each failed gate, agents are DM'd their specific errors and given time to fix them.
 Returns the final gate result. Use this after all agents report "done" to ship with confidence.`,
   {
-    max_retries: z.number().optional().describe('Max gate attempts before giving up (default: 5)'),
-    wait_seconds: z.number().optional().describe('Seconds to wait between gate attempts for agents to fix errors (default: 30)'),
+    max_retries: cNum().optional().describe('Max gate attempts before giving up (default: 5)'),
+    wait_seconds: cNum().optional().describe('Seconds to wait between gate attempts for agents to fix errors (default: 30)'),
   },
   async ({ max_retries, wait_seconds }) => {
     const sid = ensureSession();
@@ -1289,7 +1321,7 @@ server.tool(
 Use this to learn which agents/models perform best for which tasks, and to optimize future assignments.`,
   {
     agent_name: z.string().optional().describe('Filter by agent name (omit for summary of all agents)'),
-    limit: z.number().optional().describe('Max records to return (default: 50)'),
+    limit: cNum().optional().describe('Max records to return (default: 50)'),
   },
   async ({ agent_name, limit }) => {
     ensureSession();
@@ -1321,11 +1353,11 @@ server.tool(
     agent_id: z.string().optional().describe('Agent session ID'),
     outcome: z.enum(['success', 'partial', 'failed']).describe('How the task went'),
     task_description: z.string().optional().describe('What the agent was doing'),
-    duration_seconds: z.number().optional().describe('How long the task took'),
-    gate_passes: z.number().optional().describe('How many gate iterations before passing'),
-    tsc_errors: z.number().optional().describe('Number of tsc errors at completion'),
-    contract_mismatches: z.number().optional().describe('Number of contract mismatches'),
-    files_changed: z.number().optional().describe('Number of files modified'),
+    duration_seconds: cNum().optional().describe('How long the task took'),
+    gate_passes: cNum().optional().describe('How many gate iterations before passing'),
+    tsc_errors: cNum().optional().describe('Number of tsc errors at completion'),
+    contract_mismatches: cNum().optional().describe('Number of contract mismatches'),
+    files_changed: cNum().optional().describe('Number of files modified'),
   },
   async ({ agent_name, agent_id, outcome, task_description, duration_seconds, gate_passes, tsc_errors, contract_mismatches, files_changed }) => {
     ensureSession();
@@ -1386,7 +1418,7 @@ server.tool(
     name: z.string().optional().describe('Name for the new agent session (default: "agent-<timestamp>")'),
     layout: z.enum(['vertical', 'horizontal', 'tiled', 'window', 'headless']).optional().describe('"horizontal" = side by side (default). "vertical" = stacked. "tiled" = auto-grid. "window" = new tmux tab. "headless" = background process (no tmux needed).'),
     model: z.string().optional().describe('Model to use for this agent. For Claude Code: "opus", "sonnet", "haiku", or full model ID. Enables multi-LLM routing — use cheap models for boilerplate, expensive for complex logic.'),
-    timeout: z.number().optional().describe('Timeout in seconds. Default: 3600 (1 hour). Set 0 for no timeout.'),
+    timeout: cNum().optional().describe('Timeout in seconds. Default: 3600 (1 hour). Set 0 for no timeout.'),
     cli: z.string().optional().describe('Custom CLI command to spawn instead of "claude" (e.g. "codex", "aider"). The agent will still use brain tools if the CLI supports MCP.'),
   },
   async ({ task, name, layout, model, timeout: timeoutSec, cli }) => {

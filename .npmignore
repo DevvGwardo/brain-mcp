@@ -1,0 +1,14 @@
+# Ignore everything by default
+*
+
+# But include these
+!dist/
+!package.json
+!README.md
+LICENSE
+
+# Exclude dev/test stuff from dist
+dist/**/*.test.*
+dist/**/*.bench.*
+dist/**/test/
+dist/**/__tests__/

@@ -28,10 +28,19 @@ Spawn parallel Hermes agents. Give them a shared brain. Ship in one command.<br>
 
 ## Install
 
-Copy and run this in your terminal:
-
+**Option 1 — npm (fastest)**
 ```bash
-git clone https://github.com/DevvGwardo/brain-mcp.git ~/brain-mcp && cd ~/brain-mcp && chmod +x setup-hermes.sh && ./setup-hermes.sh
+npm install -g @hermes/brain-mcp
+```
+
+Then register with Hermes:
+```bash
+hermes mcp add brain -s user -- brain-mcp
+```
+
+**Option 2 — from source**
+```bash
+curl -fsSL https://raw.githubusercontent.com/DevvGwardo/brain-mcp/main/install.sh | bash
 ```
 
 The installer:

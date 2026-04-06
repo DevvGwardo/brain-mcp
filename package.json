@@ -1,5 +1,5 @@
 {
-  "name": "brain-mcp",
+  "name": "@hermes/brain-mcp",
   "version": "1.0.0",
   "description": "Brain MCP — shared coordination layer for Hermes Agent, Claude Code, and other MCP clients. Powers hermes-brain multi-agent orchestration.",
   "type": "module",
@@ -7,6 +7,9 @@
   "bin": {
     "brain-mcp": "dist/index.js",
     "brain-conductor": "dist/conductor.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
     "build": "tsc",

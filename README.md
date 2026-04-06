@@ -405,6 +405,49 @@ Everything below covers the full technical depth.
 
 ---
 
+## Performance
+
+Run the benchmarks yourself:
+
+```bash
+node benchmark.mjs        # SQLite direct layer (1000 iterations)
+node benchmark-mcp.mjs    # MCP tool layer (30 iterations per tool)
+```
+
+### SQLite Direct Layer (2026-04-06, M4 Pro, WAL mode)
+
+| Operation | avg | p50 | p95 | p99 | throughput |
+|:----------|:----|:----|:----|:----|:-----------|
+| session_register | 0.021ms | 0.011ms | 0.027ms | 0.039ms | ~47K/s |
+| message_post (1 msg) | 0.014ms | 0.011ms | 0.019ms | 0.031ms | ~70K/s |
+| message_read (50 msgs) | 0.042ms | 0.042ms | 0.045ms | 0.066ms | ~24K/s |
+| state_get | 0.002ms | 0.002ms | 0.002ms | 0.003ms | ~570K/s |
+| claim_query (all) | 0.001ms | 0.001ms | 0.002ms | 0.002ms | ~670K/s |
+| heartbeat_pulse (update) | 0.002ms | 0.002ms | 0.002ms | 0.003ms | ~464K/s |
+| session_query (by id) | 0.002ms | 0.002ms | 0.002ms | 0.003ms | ~455K/s |
+
+Direct SQLite: every core coordination operation is sub-millisecond. The KV store (state_get) sustains ~570K reads/s. High-frequency coordination (heartbeats, claims, state) stays well under 1ms.
+
+### MCP Tool Layer (2026-04-06, stdio JSON-RPC, 30 calls each)
+
+| Tool | avg | p50 | p95 | min | max |
+|:-----|:----|:----|:----|:----|:----|
+| brain_status | 12.2ms | 12.0ms | 15.6ms | 8.8ms | 21.2ms |
+| brain_sessions | 1.9ms | 1.7ms | 3.6ms | 0.9ms | 4.7ms |
+| brain_keys | 1.6ms | 1.6ms | 2.6ms | 0.8ms | 4.5ms |
+| brain_claims | 2.0ms | 1.8ms | 3.4ms | 1.2ms | 4.9ms |
+| brain_metrics | 2.0ms | 1.9ms | 4.0ms | 1.1ms | 4.4ms |
+
+MCP tool calls include JSON-RPC framing, stdio IPC, TypeScript tool dispatch, and SQLite query. Most tools respond in 1-2ms once the server is warm. `brain_status` is slower (12ms) because it aggregates session data from all rooms — 3000+ sessions were present during the benchmark.
+
+### What this means in practice
+
+- **High-frequency coordination** (heartbeats every 2-3 agent turns, claim/release, state get/set): always goes through Python `hermes.db.BrainDB` directly — not the MCP layer. Sub-millisecond, no stdio overhead.
+- **Agent-level operations** (spawn, gate, contract check, swarm): use MCP tools. 1-5ms per call is fine — these happen once per agent, not per turn.
+- **Zero-token coordination overhead**: the entire coordination layer (messaging, locking, state, heartbeats) adds no LLM token cost. Tokens are only spent on actual work.
+
+---
+
 ## Architecture Deep Dive
 
 ```mermaid
@@ -635,6 +678,8 @@ brain-mcp/
 │   ├── db.py             # Direct SQLite access (shares brain.db)
 │   ├── gate.py           # Compiler + contract checks
 │   └── prompt.py         # Agent prompt templates
+├── benchmark.mjs         # SQLite layer benchmark (1000 iterations)
+├── benchmark-mcp.mjs     # MCP tool layer benchmark (30 calls per tool)
 ├── setup-hermes.sh       # Full installer
 └── pyproject.toml        # Python package config
 ```

@@ -576,7 +576,7 @@ erDiagram
     sessions ||--o{ metrics : records
 
     sessions { text id PK text name text room text status text progress text last_heartbeat }
-    messages { int id PK text channel text room text sender content text created_at }
+    messages { int id PK text channel text room text sender text content text created_at }
     direct_messages { int id PK text from_id text to_id text content bool read }
     state { text key PK text scope text value text updated_by }
     claims { text resource PK text owner_id text expires_at }

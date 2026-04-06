@@ -26,33 +26,33 @@ Spawn parallel Hermes agents. Give them a shared brain. Ship in one command.<br>
 
 ---
 
-## Install (Copy-Paste)
+## Install
+
+Copy and run this in your terminal:
 
 ```bash
-git clone https://github.com/DevvGwardo/brain-mcp.git ~/brain-mcp \
-  && cd ~/brain-mcp \
-  && npm install \
-  && npm run build \
-  && pip install -e . \
-  && claude mcp add brain -s user -- node ~/brain-mcp/dist/index.js \
-  && hermes mcp add brain -- node ~/brain-mcp/dist/index.js
+git clone https://github.com/DevvGwardo/brain-mcp.git ~/brain-mcp && cd ~/brain-mcp && chmod +x setup-hermes.sh && ./setup-hermes.sh
 ```
+
+The installer:
+1. Builds the Node.js MCP server (`brain-mcp`)
+2. Installs the Python orchestration package (`hermes-brain`)
+3. Registers the brain as an MCP server in Hermes and Claude Code
 
 **Verify:**
 ```bash
-claude mcp list | grep brain
+hermes mcp list | grep brain
 hermes-brain --help
 ```
 
-**Prerequisites:** Python 3.10+, Node.js 18+, [Hermes Agent](https://github.com/NousResearch/hermes-agent) (optional — only needed for `hermes mcp add`), [Claude Code](https://docs.claude.com/claude-code/getting-started.html) (optional — only needed for `claude mcp add`)
+**Prerequisites:** Python 3.10+, Node.js 18+, [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Claude Code](https://docs.claude.com/claude-code/getting-started.html)
 
-**Sharing with friends?** Same one-liner above — it works anywhere Hermes runs (bare metal, WSL, or inside a Hermes Docker container). If they're running inside Docker, tell them to spawn agents with `layout: "headless"` since tmux panes can't render in a headless container:
+**Sharing with friends?** Each person's brain is its own isolated SQLite DB — no network config needed. Same one-liner works anywhere.
 
+**Docker users:** Spawn agents with `layout: "headless"` since tmux panes can't render in a headless container:
 ```python
-brain_wake({ task: "...", layout: "headless" })  # Docker-safe spawn
+brain_wake({ task: "...", layout: "headless" })
 ```
-
-Each friend's brain is its own isolated SQLite DB — no network config, no shared state, fully self-contained.
 
 ---
 

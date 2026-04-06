@@ -547,7 +547,7 @@ sequenceDiagram
     Note over O,DB: Agent X went stale (no pulse 60s+)
 
     O->>DB: Get X's progress, claims, messages
-    DB-->>O: "was editing src/api; claimed 3 files"
+    DB-->O: "was editing src/api, claimed 3 files"
 
     O->>DB: Release X's claims
     O->>DB: Record failure metric

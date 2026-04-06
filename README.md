@@ -26,29 +26,25 @@ Spawn parallel Hermes agents. Give them a shared brain. Ship in one command.<br>
 
 ---
 
-## Install
+## Install (Copy-Paste)
 
 ```bash
 git clone https://github.com/DevvGwardo/brain-mcp.git ~/brain-mcp \
   && cd ~/brain-mcp \
-  && ./setup-hermes.sh
+  && npm install \
+  && npm run build \
+  && pip install -e . \
+  && claude mcp add brain -s user -- node ~/brain-mcp/dist/index.js \
+  && hermes mcp add brain -- node ~/brain-mcp/dist/index.js
 ```
-
-The installer does three things:
-1. Builds the Node.js MCP server (`brain-mcp`)
-2. Installs the Python orchestration package (`hermes-brain`)
-3. Registers the brain as an MCP server in Hermes (and Claude Code if present)
-
-**Prerequisites:** [Hermes Agent](https://github.com/NousResearch/hermes-agent), Python 3.10+, Node.js 18+
 
 **Verify:**
-
 ```bash
-hermes mcp list | grep brain
-# brain: node .../brain-mcp/dist/index.js - ✓ Connected
-
+claude mcp list | grep brain
 hermes-brain --help
 ```
+
+**Prerequisites:** Python 3.10+, Node.js 18+, [Hermes Agent](https://github.com/NousResearch/hermes-agent) (optional — only needed for `hermes mcp add`), [Claude Code](https://docs.claude.com/claude-code/getting-started.html) (optional — only needed for `claude mcp add`)
 
 **Sharing with friends?** Same one-liner above — it works anywhere Hermes runs (bare metal, WSL, or inside a Hermes Docker container). If they're running inside Docker, tell them to spawn agents with `layout: "headless"` since tmux panes can't render in a headless container:
 

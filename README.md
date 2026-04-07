@@ -227,7 +227,7 @@ Phases run sequentially. Agents within a phase run in parallel. The integration 
 
 ## Brain Tools
 
-**30+ tools across 9 categories.** All available to Hermes, Claude Code, and any MCP-compatible agent.
+**35+ tools across 12 categories.** All available to Hermes, Claude Code, and any MCP-compatible agent.
 
 ### Identity & Health
 

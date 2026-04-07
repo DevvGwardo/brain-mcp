@@ -16,6 +16,12 @@ import { execSync } from 'node:child_process';
 import { existsSync, readdirSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import {
+  buildRecoveryContext,
+  formatRecoveryReport,
+  markGhostSession,
+  type RecoveryContext,
+} from './spawn-recovery.js';
 
 const dbPath = process.env.BRAIN_DB_PATH || `${process.env.HOME}/.claude/brain/brain.db`;
 const room = process.env.BRAIN_ROOM || process.cwd();
@@ -118,90 +124,7 @@ function getProcessInfo(pid: number): { alive: boolean; state: string; cmd: stri
   }
 }
 
-// ── Recovery context building ─────────────────────────────────────────────────
-
-interface RecoveryContext {
-  agentId: string;
-  agentName: string;
-  room: string;
-  claims: string[];
-  checkpoints: Array<{ id: string; created_at: string; state_summary: string }>;
-  recentContext: Array<{ entry_type: string; summary: string; created_at: string }>;
-  taskState: { running_tasks: string[]; last_progress: string | null };
-  metrics: { total_tasks: number; failures: number } | null;
-}
-
-function buildRecoveryContext(agentId: string, agentName: string, room: string): RecoveryContext {
-  const claims = db.getClaims(room).filter(c => c.owner_id === agentId).map(c => c.resource);
-
-  const checkpoints = db.getCheckpoints(room, agentId, 3).map(cp => {
-    let stateSummary = '';
-    try {
-      const state = JSON.parse(cp.state);
-      stateSummary = state.current_task
-        ? `${state.current_task}: ${state.progress_summary || 'no progress'}`
-        : state.progress_summary || 'unknown';
-    } catch {
-      stateSummary = 'checkpoint (state unreadable)';
-    }
-    return { id: cp.id, created_at: cp.created_at, state_summary: stateSummary };
-  });
-
-  const recentContext = db.getContext(room, { session_id: agentId, limit: 10, order: 'desc' })
-    .map(e => ({ entry_type: e.entry_type, summary: e.summary, created_at: e.created_at }));
-
-  const tasks = db.getContext(room, { session_id: agentId, entry_type: 'action', limit: 5 })
-    .map(e => e.summary);
-  const lastProgress = db.getSession(agentId)?.progress || null;
-
-  const metricsRows = db.getMetrics(room, agentName, 100);
-  const totalTasks = metricsRows.length;
-  const failures = metricsRows.filter(m => m.outcome === 'failed').length;
-
-  return {
-    agentId,
-    agentName,
-    room,
-    claims,
-    checkpoints,
-    recentContext,
-    taskState: { running_tasks: tasks, last_progress: lastProgress },
-    metrics: totalTasks > 0 ? { total_tasks: totalTasks, failures } : null,
-  };
-}
-
-function formatRecoveryReport(ctx: RecoveryContext): string {
-  const lines: string[] = [
-    `RECOVERY REPORT for ${ctx.agentName} (${ctx.agentId})`,
-    `Room: ${ctx.room}`,
-    `Generated: ${new Date().toISOString()}`,
-    '',
-    '--- Claims ---',
-    ctx.claims.length > 0 ? ctx.claims.join(', ') : '(none)',
-    '',
-    '--- Recent Checkpoints ---',
-  ];
-
-  for (const cp of ctx.checkpoints) {
-    lines.push(`  [${cp.created_at}] ${cp.state_summary}`);
-  }
-
-  lines.push('', '--- Recent Context ---');
-  for (const entry of ctx.recentContext.slice(0, 5)) {
-    lines.push(`  [${entry.entry_type}] ${entry.summary} (${entry.created_at})`);
-  }
-
-  lines.push('', '--- Task State ---');
-  lines.push(`  Running tasks: ${ctx.taskState.running_tasks.length > 0 ? ctx.taskState.running_tasks.join(', ') : '(none)'}`);
-  lines.push(`  Last progress: ${ctx.taskState.last_progress || '(none)'}`);
-
-  if (ctx.metrics) {
-    lines.push('', '--- Metrics ---');
-    lines.push(`  Total tasks: ${ctx.metrics.total_tasks}, Failures: ${ctx.metrics.failures}`);
-  }
-
-  return lines.join('\n');
-}
+// Recovery context building delegated to spawn-recovery.ts
 
 // ── Failure tracking ──────────────────────────────────────────────────────────
 
@@ -278,7 +201,7 @@ async function attemptRespawn(
   }
 
   // Build and save recovery context
-  const recoveryCtx = buildRecoveryContext(agentId, agentName, room);
+  const recoveryCtx = buildRecoveryContext(db, agentId, agentName, room);
   try {
     db.saveCheckpoint(room, agentId, agentName, {
       current_task: `Recovery checkpoint after ${record.deathType} (attempt ${record.failureCount})`,
@@ -429,7 +352,7 @@ async function main() {
             );
 
             // Build recovery context and attempt respawn
-            const recoveryCtx = buildRecoveryContext(agent.id, agent.name, room);
+            const recoveryCtx = buildRecoveryContext(db, agent.id, agent.name, room);
             const respawnResult = await attemptRespawn(agent.id, agent.name, record);
 
             log(`Respawn ${respawnResult.spawned ? 'succeeded' : 'skipped'}: ${respawnResult.reason}`);

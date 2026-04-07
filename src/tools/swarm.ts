@@ -8,12 +8,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { execSync, spawn } from 'node:child_process';
-import { openSync, writeFileSync, closeSync } from 'node:fs';
+import { openSync, writeFileSync, closeSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { BrainDB } from '../db.js';
 import { minimalAgentPrompt } from '../autopilot.js';
+import { spawnWithRecovery, savePreSpawnCheckpoint, buildRecoveryContext, classifyError } from '../spawn-recovery.js';
 
 interface SwarmToolsOptions {
   db: BrainDB;
@@ -160,16 +161,21 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
             headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
           }
 
-          if (spawnLayout !== 'headless') {
-            try { execSync('tmux display-message -p ""', { stdio: 'ignore' }); } catch { /* fall back to headless */ }
+          // Spawn with recovery: error detection, retry w/ backoff, startup verification
+          const result = await spawnWithRecovery(
+            db, room, agentSessionId, agentName, agentCfg.task,
+            headlessCmd, logFile,
+          );
+
+          if (result.success) {
+            spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
+          } else {
+            db.pulse(agentSessionId, 'failed', `spawn recovery exhausted: ${result.error}`);
+            errors.push(`${agentName}: ${result.error}`);
           }
 
-          const watcherFile = join(tmpdir(), `brain-swarm-${ts}-${agentName}.sh`);
-          writeFileSync(watcherFile, `#!/bin/bash\n${headlessCmd}\nrm -f "${promptFile}" "${watcherFile}"`, { mode: 0o755 });
-          const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-          watcher.unref();
-
-          spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
+          // Clean up prompt file
+          try { unlinkSync(promptFile); } catch { /* best effort */ }
         } catch (err: any) {
           errors.push(`${agentCfg.name}: ${err.message}`);
         }
@@ -292,28 +298,22 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
             headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
           }
 
-          const watcherFile = join(tmpdir(), `brain-headless-${ts}.sh`);
-          const watcherContent = `#!/bin/bash
-AGENT_ID="${agentSessionId}"
-LOG="${logFile}"
-TIMEOUT=${agentTimeout}
-START_TIME=$(date +%s)
+          // Spawn with recovery: error detection, retry w/ backoff, startup verification
+          const result = await spawnWithRecovery(
+            db, room, agentSessionId, agentName, task,
+            headlessCmd, logFile,
+          );
 
-${headlessCmd}
-EXIT_CODE=$?
+          // Clean up prompt file
+          try { unlinkSync(promptFile); } catch { /* best effort */ }
 
-rm -f "${promptFile}" "${watcherFile}"
-
-if [ $EXIT_CODE -ne 0 ]; then
-  echo "Agent exited with code $EXIT_CODE" >> "$LOG"
-fi
-`;
-          writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
-          const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-          watcher.on('error', (err) => {
-            try { db.pulse(agentSessionId, 'failed', `headless spawn failed: ${err.message}`); } catch { /* best effort */ }
-          });
-          watcher.unref();
+          if (!result.success) {
+            db.pulse(agentSessionId, 'failed', `spawn recovery exhausted: ${result.error}`);
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: result.error }) }],
+              isError: true,
+            };
+          }
 
           return {
             content: [{

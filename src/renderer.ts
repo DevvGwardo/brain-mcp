@@ -50,6 +50,12 @@ const dim = (text: string) => `${C.dim}${text}${C.reset}`;
 const bold = (text: string) => `${C.bold}${text}${C.reset}`;
 const color = (text: string, c: string) => `${c}${text}${C.reset}`;
 
+// Strip all ANSI escape sequences from a string
+function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+}
+
 // ── Tool emoji registry ───────────────────────────────────────────────────────
 
 export const TOOL_EMOJI: Record<string, string> = {
@@ -203,9 +209,15 @@ export function renderTool(toolName: string, rawResult: string, options?: Partia
 
 function renderToolRaw(toolName: string, rawResult: string, o: Required<RenderOptions>): string {
   const emoji = toolEmoji(toolName);
-  const prefix = `${emoji} ${bold(toolName)}`;
+  const prefix = `${emoji} ${toolName}`;
   try {
     const data = JSON.parse(rawResult);
+    const renderer = TOOL_RENDERERS[toolName];
+    if (renderer) {
+      // Render normally then strip ANSI codes for the color=false output
+      const rendered = renderer(data, { ...o, color: true });
+      return stripAnsi(rendered);
+    }
     return `${prefix}\n${formatJSONRaw(data, 0)}`;
   } catch {
     return `${prefix}\n${rawResult}`;

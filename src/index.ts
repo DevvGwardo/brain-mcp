@@ -391,8 +391,8 @@ HERMES/MINIMAX TOOL-NAMING RULE:
 
 IMPORTANT: Do NOT fall back to the built-in Agent tool when the user asks for parallel agents or wake/swarm. Use these brain tools instead — they spawn visible, independent sessions that the user can watch.
 
-SIMPLIFIED INTERFACE: The "brain" meta-tool wraps all coordination into one tool call with an action parameter.
-Spawned agents should use brain(action=...) instead of individual tools. It handles heartbeats, file locking, and checkpoints automatically.`,
+SIMPLIFIED INTERFACE: The "control" meta-tool wraps all coordination into one tool call with an action parameter.
+Spawned agents should use control(action=...) instead of individual tools. It handles heartbeats, file locking, and checkpoints automatically.`,
   }
 );
 
@@ -1235,7 +1235,14 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
     const sid = ensureSession();
     startLeadWatchdog(sid);
 
-    const spawnLayout = layout || 'headless';
+    let spawnLayout = layout || 'headless';
+    if (spawnLayout !== 'headless') {
+      try {
+        execSync('tmux display-message -p ""', { stdio: 'ignore' });
+      } catch {
+        spawnLayout = 'headless';
+      }
+    }
     const cliBase = process.env.BRAIN_DEFAULT_CLI || 'claude';
 
     // Store shared context
@@ -1308,15 +1315,6 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
         }
 
-        // For tmux modes, use brain_wake's tmux logic
-        if (spawnLayout !== 'headless') {
-          try {
-            execSync('tmux display-message -p ""', { stdio: 'ignore' });
-          } catch {
-            // Fall back to headless if tmux not available
-          }
-        }
-
         const spawnResult = await spawnWithRecovery(
           db,
           room,
@@ -1350,6 +1348,8 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           agents: spawned.map((s) => ({ name: s.name, sessionId: s.sessionId, workspace: s.workspace })),
           errors: errors.length > 0 ? errors : undefined,
           cli: cliBase,
+          layout: spawnLayout,
+          requestedLayout: layout || 'headless',
           message: `Swarm launched: ${spawned.length} agents spawned${errors.length ? `, ${errors.length} failed` : ''}. Monitor with brain_agents. Run brain_auto_gate when all agents report done.`,
         }, null, 2),
       }],
@@ -2044,7 +2044,14 @@ server.tool(
     const agentName = name || `agent-${Date.now()}`;
     const agentSessionId = randomUUID();
     const tmuxName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const spawnLayout = layout || 'horizontal';
+    let spawnLayout = layout || 'horizontal';
+    if (spawnLayout !== 'headless') {
+      try {
+        execSync('tmux display-message -p ""', { stdio: 'ignore' });
+      } catch {
+        spawnLayout = 'headless';
+      }
+    }
     const isHeadless = spawnLayout === 'headless';
     const agentTimeout = timeoutSec ?? (isHeadless ? 1800 : 3600);
     const workspacePath = prepareAgentWorkspace(room, agentName, isolation || 'shared');
@@ -2058,18 +2065,6 @@ server.tool(
       db.pushContext(room, sid, sessionName, 'decision',
         `Auto-routed "${agentName}" to model ${model} (confidence: ${rec.confidence}, complexity: ${rec.complexity})`,
         rec.reasoning, undefined, ['auto-route']);
-    }
-
-    // Tmux modes require tmux
-    if (!isHeadless) {
-      try {
-        execSync('tmux display-message -p ""', { stdio: 'ignore' });
-      } catch {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: 'Not inside a tmux session. Use layout="headless" for non-tmux environments.' }) }],
-          isError: true,
-        };
-      }
     }
 
     // Post the task to the brain for audit trail
@@ -2108,7 +2103,7 @@ server.tool(
     }
 
     // Build the prompt — use minimal autopilot prompt (replaces 40+ line protocol dump)
-    // The "brain" meta-tool handles heartbeats, file locking, and checkpoints automatically.
+    // The "control" meta-tool handles heartbeats, file locking, and checkpoints automatically.
     // This works for ALL CLIs — no more transport-specific tool name prefixing.
     const prompt = minimalAgentPrompt(agentName, task, {
       files,
@@ -2215,6 +2210,7 @@ fi
               agentSessionId,
               taskId,
               mode: 'headless',
+              requestedLayout: layout || 'horizontal',
               model: model || 'default',
               workspace: workspacePath,
               isolation: isolation || 'shared',
@@ -2363,6 +2359,7 @@ rm -f "${watcherFile}"
             agentSessionId,
             taskId,
             layout: spawnLayout,
+            requestedLayout: layout || 'horizontal',
             model: model || 'default',
             workspace: workspacePath,
             isolation: isolation || 'shared',

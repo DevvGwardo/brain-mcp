@@ -10,7 +10,7 @@
  * 6. 49 tools overwhelm tool selection → LLM picks wrong tool or hallucinates
  * 7. Hermes sees "mcp_brain_brain_pulse" (double prefix) → tool call fails
  *
- * Solution: One meta-tool "brain" with an action parameter.
+ * Solution: One meta-tool "control" with an action parameter.
  * Auto-pulse, auto-claim, auto-release, auto-checkpoint.
  * Spawned agents get a 5-line prompt instead of 40+.
  */
@@ -143,7 +143,7 @@ Heartbeats, file locking, checkpoints are ALL AUTOMATIC. Just do your work.`;
 
   const toolHandler = async ({ action, content, key, value, query, channel, to, file, category, summary, reason, limit }: any) => {
       ensureState();
-      autoPulse(`brain:${action}`);
+      autoPulse(`control:${action}`);
       const dms = consumeDMs();
 
       let result: any;
@@ -279,7 +279,7 @@ Heartbeats, file locking, checkpoints are ALL AUTOMATIC. Just do your work.`;
         case 'help': {
           result = {
             actions: ACTIONS.map(a => a),
-            tip: 'Prefer one brain/control tool call at a time. For a quick overview, use action="status".',
+            tip: 'Prefer one control tool call at a time. For a quick overview, use action="status".',
           };
           break;
         }
@@ -294,17 +294,8 @@ Heartbeats, file locking, checkpoints are ALL AUTOMATIC. Just do your work.`;
     };
 
   server.tool(
-    'brain',
-    toolDescription,
-    toolSchema,
-    toolHandler,
-  );
-
-  server.tool(
     'control',
-    `${toolDescription}
-
-Alias of the "brain" meta-tool with a less ambiguous name for Hermes/MiniMax clients.`,
+    toolDescription,
     toolSchema,
     toolHandler,
   );
@@ -318,7 +309,7 @@ function err(message: string, dms?: string) {
 // ── Minimal prompt for spawned agents ──────────────────────────────────────
 
 /**
- * Generate a minimal prompt for spawned agents that use the brain meta-tool.
+ * Generate a minimal prompt for spawned agents that use the control meta-tool.
  * This replaces the 40+ line protocol dump with 8 lines.
  */
 export interface MinimalAgentPromptOptions {
@@ -338,7 +329,7 @@ export function minimalAgentPrompt(
     ? { files: options }
     : (options || {});
   const fileScope = normalized.files?.length
-    ? `Your files: ${normalized.files.join(', ')}. Call brain(action="edit", file=...) before editing each one.`
+    ? `Your files: ${normalized.files.join(', ')}. Call control(action="edit", file=...) before editing each one.`
     : '';
   const roleLine = normalized.role ? `Your role: ${normalized.role}.` : '';
   const depsLine = normalized.dependsOn?.length
@@ -353,15 +344,15 @@ export function minimalAgentPrompt(
     `You are "${agentName}", a focused coding agent.`,
     roleLine,
     workspaceLine,
-    `You have one coordination tool: brain(action, ...). Use brain(action="help") to see all actions.`,
+    `You have one coordination tool: control(action, ...). Use control(action="help") to see all actions.`,
     fileScope,
     depsLine,
     '',
     `YOUR TASK: ${task}`,
     acceptanceLine ? `\n${acceptanceLine}` : '',
     '',
-    `When done: brain(action="done", summary="what you did")`,
-    `If stuck: brain(action="failed", reason="what went wrong")`,
+    `When done: control(action="done", summary="what you did")`,
+    `If stuck: control(action="failed", reason="what went wrong")`,
     `Heartbeats, file locking, and checkpoints happen automatically.`,
   ].filter(Boolean).join('\n');
 }

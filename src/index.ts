@@ -190,7 +190,7 @@ IMPORTANT: Do NOT fall back to the built-in Agent tool when the user asks for pa
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_register',
+  'register',
   'Register or rename this session. Call this first to set a meaningful name for coordination with other sessions.',
   {
     name: z.string().describe('Display name for this session (e.g. "frontend-worker", "reviewer", "architect")'),
@@ -209,7 +209,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_sessions',
+  'sessions',
   'List all active sessions. See who else is connected and their session IDs for DMs.',
   {
     all_rooms: cBool().optional().describe('Show sessions from ALL rooms, not just the current working directory'),
@@ -224,7 +224,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_status',
+  'status',
   'Show this session\'s info, current room, and count of active sessions.',
   async () => {
     const sid = ensureSession();
@@ -250,7 +250,7 @@ server.tool(
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_pulse',
+  'pulse',
   'Report your progress and stay alive. Call this every few tool calls to let the lead know you are working. Returns any pending DMs so you stay in sync.',
   {
     status: z.enum(['working', 'done', 'failed']).describe('Current status: working (still going), done (task complete), failed (hit a blocker)'),
@@ -279,7 +279,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_agents',
+  'agents',
   'Check health of all agents in the room. Shows status, last heartbeat age, progress, and held claims. Use this to monitor spawned agents.',
   {
     include_stale: cBool().optional().describe('Include agents that stopped heartbeating (default: true)'),
@@ -307,7 +307,7 @@ server.tool(
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_post',
+  'post',
   'Post a message to a channel. All sessions in the same working directory (room) can read it.',
   {
     content: z.string().describe('Message content'),
@@ -324,7 +324,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_read',
+  'read',
   'Read messages from a channel. Use since_id to poll for only new messages since your last read.',
   {
     channel: z.string().optional().describe('Channel name (default: "general")'),
@@ -345,7 +345,7 @@ server.tool(
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_dm',
+  'dm',
   'Send a direct message to another session. Works across rooms. Target by session name or ID.',
   {
     to: z.string().describe('Target session name or ID'),
@@ -366,7 +366,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_inbox',
+  'inbox',
   'Read direct messages sent to or from this session. Use since_id for polling.',
   {
     since_id: cNum().optional().describe('Only return messages with ID greater than this'),
@@ -385,7 +385,7 @@ server.tool(
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_set',
+  'set',
   'Set a key-value pair in the shared state store. Visible to all sessions in the same scope.',
   {
     key: z.string().describe('State key'),
@@ -403,7 +403,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_get',
+  'get',
   'Get a value from the shared state store.',
   {
     key: z.string().describe('State key to read'),
@@ -432,7 +432,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_keys',
+  'keys',
   'List all keys in the shared state store for a given scope.',
   {
     scope: z.string().optional().describe('Scope (default: current room)'),
@@ -448,7 +448,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_delete',
+  'delete',
   'Delete a key from the shared state store.',
   {
     key: z.string().describe('State key to delete'),
@@ -465,11 +465,78 @@ server.tool(
 );
 
 // ═══════════════════════════════════════
+//  Atomic Counters
+// ═══════════════════════════════════════
+
+server.tool(
+  'incr',
+  'Atomically increment a numeric counter in shared state. Thread-safe — use for shared counters, progress tracking, or aggregation across agents.',
+  {
+    key: z.string().describe('Counter key name'),
+    delta: z.number().optional().describe('Amount to increment by (default: 1)'),
+    scope: z.string().optional().describe('Scope (default: current room)'),
+  },
+  async ({ key, delta, scope }) => {
+    ensureSession();
+    const s = scope || room;
+    try {
+      const result = db.incr(key, s, delta ?? 1);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, key, scope: s, ...result }) }] };
+    } catch (e: any) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: e.message }) }] };
+    }
+  }
+);
+
+server.tool(
+  'counter',
+  'Get the current value of an atomic counter without incrementing.',
+  {
+    key: z.string().describe('Counter key name'),
+    scope: z.string().optional().describe('Scope (default: current room)'),
+  },
+  async ({ key, scope }) => {
+    ensureSession();
+    const s = scope || room;
+    try {
+      const value = db.get_counter(key, s);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ key, scope: s, value }) }] };
+    } catch (e: any) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: e.message }) }] };
+    }
+  }
+);
+
+// ═══════════════════════════════════════
+//  Barriers
+// ═══════════════════════════════════════
+
+server.tool(
+  'wait_until',
+  'Barrier primitive — atomically increment a counter. When current >= threshold, returns reached:true for all callers simultaneously. Use for "wait for N agents to check in" semantics.',
+  {
+    key: z.string().describe('Barrier identifier (descriptive name)'),
+    threshold: cNum().describe('Number of agents that must call before barrier releases'),
+    scope: z.string().optional().describe('Scope (default: current room)'),
+  },
+  async ({ key, threshold, scope }) => {
+    ensureSession();
+    const s = scope || room;
+    try {
+      const result = db.wait_on(key, s, threshold, sessionId || 'anon', sessionName);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+    } catch (e: any) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: e.message }) }] };
+    }
+  }
+);
+
+// ═══════════════════════════════════════
 //  Resource Coordination (Mutex/Claims)
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_claim',
+  'claim',
   'Claim exclusive access to a resource (file, task, etc.). Prevents other sessions from claiming it. Use TTL for auto-release.',
   {
     resource: z.string().describe('Resource identifier (e.g. file path, task name, "src/api/routes.ts")'),
@@ -485,7 +552,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_release',
+  'release',
   'Release a previously claimed resource so other sessions can claim it.',
   {
     resource: z.string().describe('Resource identifier to release'),
@@ -500,7 +567,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_claims',
+  'claims',
   'List all active resource claims. See what resources are locked and by whom.',
   {
     current_room: cBool().optional().describe('Only show claims in the current room'),
@@ -519,7 +586,7 @@ server.tool(
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_contract_set',
+  'contract_set',
   `Publish interface contracts for functions your module provides or expects from other modules.
 Call this AFTER writing/modifying a file to declare what it exports (provides),
 and BEFORE calling cross-module functions to declare what you need (expects).
@@ -562,7 +629,7 @@ Two input shapes are accepted:
 );
 
 server.tool(
-  'brain_contract_get',
+  'contract_get',
   'Read published contracts. See what functions other agents provide or expect. Use this to align your code with their interfaces.',
   {
     module: z.string().optional().describe('Filter by module path (e.g. "src/ui.ts")'),
@@ -578,7 +645,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_contract_check',
+  'contract_check',
   `Validate all contracts in the room. Finds: missing functions (expected but no provider),
 param count mismatches, param type mismatches, return type mismatches.
 Call this periodically or before marking your task as done.
@@ -604,7 +671,7 @@ Returns an array of mismatches — empty array means all contracts are satisfied
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_gate',
+  'gate',
   `Run the integration gate: tsc --noEmit + contract validation.
 Catches type errors, missing imports, param mismatches between agents.
 If errors are found, DMs each responsible agent with their specific errors and resets their status to "working".
@@ -636,7 +703,7 @@ Use this after all agents report "done" to verify integration before shipping.`,
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_clear',
+  'clear',
   'Clear all brain data — messages, state, claims, contracts, sessions. Use this to reset the brain for a fresh start.',
   {
     confirm: cBool().describe('Must be true to confirm the clear operation'),
@@ -657,7 +724,7 @@ server.tool(
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_context_push',
+  'context_push',
   `Record what you just did, learned, or decided. This is your external long-term memory.
 When your context window compresses and you forget earlier work, the ledger still has it.
 Call this after every significant action — it's cheap and saves you from losing track.`,
@@ -680,7 +747,7 @@ Call this after every significant action — it's cheap and saves you from losin
 );
 
 server.tool(
-  'brain_context_get',
+  'context_get',
   `Read back your context ledger — everything you've done, learned, and decided.
 Use this when you feel lost, after context compression, or to review what happened.
 Filter by type, file, or session to get exactly what you need.`,
@@ -711,7 +778,7 @@ Filter by type, file, or session to get exactly what you need.`,
 );
 
 server.tool(
-  'brain_context_summary',
+  'context_summary',
   `Get a condensed overview of all context: what's been done, which files were touched,
 how many actions/discoveries/decisions/errors. Use this to quickly re-orient after a break
 or context compression.`,
@@ -739,7 +806,7 @@ or context compression.`,
 );
 
 server.tool(
-  'brain_checkpoint',
+  'checkpoint',
   `Save a snapshot of your current working state. This is your insurance policy against
 context loss. Call this every 10-15 tool calls, or before starting a complex sub-task.
 If you later lose track of what you're doing, brain_checkpoint_restore brings it all back.`,
@@ -767,7 +834,7 @@ If you later lose track of what you're doing, brain_checkpoint_restore brings it
 );
 
 server.tool(
-  'brain_checkpoint_restore',
+  'checkpoint_restore',
   `Restore your last saved checkpoint. Use this when you've lost context, feel confused
 about what you were doing, or after a long conversation compression.
 Returns your last known state: current task, files touched, decisions made, progress, and next steps.`,
@@ -808,7 +875,7 @@ Returns your last known state: current task, files touched, decisions made, prog
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_swarm',
+  'swarm',
   `Spawn multiple agents at once to work on a task in parallel. This is the high-level
 orchestration tool — one call replaces multiple brain_wake calls.
 Automatically: registers as lead, creates a task plan, spawns all agents, starts watchdog.
@@ -951,7 +1018,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_remember',
+  'remember',
   `Store knowledge that persists across sessions. Use this to record discoveries about the codebase,
 architectural decisions, patterns found, or anything future agents should know.
 Unlike brain_set (ephemeral shared state), memories survive brain_clear and are searchable.`,
@@ -970,7 +1037,7 @@ Unlike brain_set (ephemeral shared state), memories survive brain_clear and are 
 );
 
 server.tool(
-  'brain_recall',
+  'recall',
   `Search persistent memory for knowledge stored by previous agents or sessions.
 Always check memory at the start of a task — previous agents may have discovered something relevant.`,
   {
@@ -1004,7 +1071,7 @@ Always check memory at the start of a task — previous agents may have discover
 );
 
 server.tool(
-  'brain_forget',
+  'forget',
   'Remove a memory by key. Use when knowledge is outdated or wrong.',
   {
     key: z.string().describe('Memory key to remove'),
@@ -1023,7 +1090,7 @@ server.tool(
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_plan',
+  'plan',
   `Create a task execution plan with dependencies. Tasks form a DAG — a task only becomes "ready"
 when all its dependencies are done. Use this instead of naively splitting work by files.
 Example: types → implementation → tests (each stage depends on the previous).`,
@@ -1055,7 +1122,7 @@ Example: types → implementation → tests (each stage depends on the previous)
 );
 
 server.tool(
-  'brain_plan_next',
+  'plan_next',
   'Get the next tasks that are ready to be worked on (all dependencies satisfied). Use this to find work to assign to agents.',
   {
     plan_id: z.string().describe('Plan ID from brain_plan'),
@@ -1080,7 +1147,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_plan_update',
+  'plan_update',
   'Update a task in the plan. When marking a task "done", dependent tasks automatically become "ready". When marking "failed", dependents are skipped.',
   {
     task_id: z.string().describe('Task ID to update'),
@@ -1106,7 +1173,7 @@ server.tool(
 );
 
 server.tool(
-  'brain_plan_status',
+  'plan_status',
   'View the full status of a task plan — see which tasks are done, running, ready, pending, or failed.',
   {
     plan_id: z.string().optional().describe('Plan ID to check. Omit to list all plans.'),
@@ -1141,7 +1208,7 @@ server.tool(
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_respawn',
+  'respawn',
   `Respawn a failed or stale agent with context about what it accomplished before failing.
 Reads the original task, the agent's posts, claims, and progress to brief the replacement.
 The replacement agent picks up where the failed one left off.`,
@@ -1235,7 +1302,7 @@ The replacement agent picks up where the failed one left off.`,
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_auto_gate',
+  'auto_gate',
   `Run the integration gate in a loop until all errors are fixed or max retries are hit.
 After each failed gate, agents are DM'd their specific errors and given time to fix them.
 Returns the final gate result. Use this after all agents report "done" to ship with confidence.`,
@@ -1316,7 +1383,7 @@ Returns the final gate result. Use this after all agents report "done" to ship w
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_metrics',
+  'metrics',
   `View agent performance history. Tracks duration, error counts, gate passes, and success rates.
 Use this to learn which agents/models perform best for which tasks, and to optimize future assignments.`,
   {
@@ -1346,7 +1413,7 @@ Use this to learn which agents/models perform best for which tasks, and to optim
 );
 
 server.tool(
-  'brain_metric_record',
+  'metric_record',
   'Record a performance metric for an agent. Call this when an agent completes or fails a task.',
   {
     agent_name: z.string().describe('Agent name'),
@@ -1407,7 +1474,7 @@ function startLeadWatchdog(leadSessionId: string): void {
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_wake',
+  'wake',
   `Spawn a NEW agent session to handle a task. Supports multiple modes:
 - tmux (default): visible split pane — requires tmux
 - headless: background process — no tmux needed, works everywhere
@@ -1477,52 +1544,52 @@ server.tool(
       // Hermes uses the configured model — pass via env var
     }
 
-    // Hermes uses brain:tool_name notation for MCP tools
+    // Hermes uses mcp_brain_tool_name notation for MCP tools
     const toolPrefix = cliType === 'hermes' ? 'mcp_brain_' : '';
 
     // Build the prompt — adapted per CLI
     const prompt = [
       cliType === 'hermes'
-        ? `You have brain MCP tools available via the "brain" MCP server. Call them as: mcp_brain_brain_register, mcp_brain_brain_pulse, mcp_brain_brain_post, mcp_brain_brain_read, mcp_brain_brain_dm, mcp_brain_brain_inbox, mcp_brain_brain_set, mcp_brain_brain_get, mcp_brain_brain_claim, mcp_brain_brain_release, mcp_brain_brain_claims, mcp_brain_brain_agents, mcp_brain_brain_contract_set, mcp_brain_brain_contract_get, mcp_brain_brain_contract_check, mcp_brain_brain_remember, mcp_brain_brain_recall, mcp_brain_brain_plan_next, mcp_brain_brain_plan_update.`
-        : 'You have brain MCP tools available (brain_register, brain_pulse, brain_sessions, brain_post, brain_read, brain_dm, brain_inbox, brain_set, brain_get, brain_claim, brain_release, brain_claims, brain_agents, brain_contract_set, brain_contract_get, brain_contract_check, brain_wake, brain_remember, brain_recall, brain_plan_next, brain_plan_update).',
+        ? `You have brain MCP tools available via the "brain" MCP server. Call them as: mcp_brain_register, mcp_brain_pulse, mcp_brain_post, mcp_brain_read, mcp_brain_dm, mcp_brain_inbox, mcp_brain_set, mcp_brain_get, mcp_brain_claim, mcp_brain_release, mcp_brain_claims, mcp_brain_agents, mcp_brain_contract_set, mcp_brain_contract_get, mcp_brain_contract_check, mcp_brain_remember, mcp_brain_recall, mcp_brain_plan_next, mcp_brain_plan_update.`
+        : 'You have brain MCP tools available (register, pulse, sessions, post, read, dm, inbox, set, get, claim, release, claims, agents, contract_set, contract_get, contract_check, wake, remember, recall, plan_next, plan_update).',
       '',
-      `IMPORTANT: Use ${toolPrefix}brain_claim before editing any file, and ${toolPrefix}brain_release when done. This prevents conflicts with other agents.`,
+      `IMPORTANT: Use ${toolPrefix}claim before editing any file, and ${toolPrefix}release when done. This prevents conflicts with other agents.`,
       '',
       `Your name: "${agentName}"`,
       `Assigned by: "${sessionName}"`,
       '',
       `HEARTBEAT PROTOCOL (CRITICAL):`,
-      `- Call ${toolPrefix}brain_pulse with status="working" and a short progress note every 2-3 tool calls`,
-      `- ${toolPrefix}brain_pulse returns any pending DMs from other agents — READ AND RESPOND to them`,
-      `- If you hit a blocker, call ${toolPrefix}brain_pulse with status="failed" and describe the issue`,
+      `- Call ${toolPrefix}pulse with status="working" and a short progress note every 2-3 tool calls`,
+      `- ${toolPrefix}pulse returns any pending DMs from other agents — READ AND RESPOND to them`,
+      `- If you hit a blocker, call ${toolPrefix}pulse with status="failed" and describe the issue`,
       `- This keeps the lead informed and prevents you from being marked as stale`,
       '',
       `CONTRACT PROTOCOL (CRITICAL — prevents integration bugs):`,
-      `- BEFORE writing code: call ${toolPrefix}brain_contract_get to see what other agents provide/expect`,
-      `- AFTER writing/modifying a file: call ${toolPrefix}brain_contract_set to publish what your module provides:`,
+      `- BEFORE writing code: call ${toolPrefix}contract_get to see what other agents provide/expect`,
+      `- AFTER writing/modifying a file: call ${toolPrefix}contract_set to publish what your module provides:`,
       `  Example: entries=[{"module":"src/ui.ts","name":"drawBattle","kind":"provides","signature":"{\"params\":[\"state: BattleState\"],\"returns\":\"void\"}"}]`,
       `- When your code CALLS a function from another module: also publish an "expects" entry with the signature you're calling with`,
-      `- BEFORE marking done: call ${toolPrefix}brain_contract_check to verify no mismatches exist`,
+      `- BEFORE marking done: call ${toolPrefix}contract_check to verify no mismatches exist`,
       `- If mismatches are found: fix your code to match the published contracts, then re-check`,
       '',
-      `MEMORY: Use ${toolPrefix}brain_remember to store important discoveries about the codebase. Use ${toolPrefix}brain_recall to check if previous agents learned something useful.`,
+      `MEMORY: Use ${toolPrefix}remember to store important discoveries about the codebase. Use ${toolPrefix}recall to check if previous agents learned something useful.`,
       '',
       `CONTEXT LEDGER (CRITICAL — prevents losing track):`,
-      `- Call ${toolPrefix}brain_context_push after every significant action, discovery, or decision`,
+      `- Call ${toolPrefix}context_push after every significant action, discovery, or decision`,
       `- Entry types: "action" (did something), "discovery" (learned something), "decision" (chose approach), "error" (hit problem), "file_change" (edited file)`,
       `- Include the file_path when relevant`,
-      `- Call ${toolPrefix}brain_checkpoint every 10-15 tool calls to save your full working state`,
-      `- If you feel lost or confused, call ${toolPrefix}brain_checkpoint_restore to recover`,
+      `- Call ${toolPrefix}checkpoint every 10-15 tool calls to save your full working state`,
+      `- If you feel lost or confused, call ${toolPrefix}checkpoint_restore to recover`,
       `- This is your insurance against context compression — the ledger remembers even when you forget`,
       '',
       `YOUR TASK:`,
       task,
       '',
       `WHEN DONE:`,
-      `1. Call ${toolPrefix}brain_contract_check — fix any mismatches before proceeding`,
-      `2. Call ${toolPrefix}brain_pulse with status="done" and a summary of what you accomplished`,
-      `3. Call ${toolPrefix}brain_post to announce what you accomplished`,
-      `4. Release all claimed files with ${toolPrefix}brain_release`,
+      `1. Call ${toolPrefix}contract_check — fix any mismatches before proceeding`,
+      `2. Call ${toolPrefix}pulse with status="done" and a summary of what you accomplished`,
+      `3. Call ${toolPrefix}post to announce what you accomplished`,
+      `4. Release all claimed files with ${toolPrefix}release`,
       `5. Exit when you are done so resources are freed`,
     ].join('\n');
 
@@ -1760,7 +1827,7 @@ rm -f "${watcherFile}"
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_commit',
+  'commit',
   `Analyze unstaged changes, determine a conventional commit type, generate a commit message,
 and stage + commit the changes. Uses git diff to understand what changed, then generates
 a conventional commit message (feat, fix, docs, refactor, test, chore, etc.).
@@ -1893,7 +1960,7 @@ Works in any language. Run from the repository root.`,
 );
 
 server.tool(
-  'brain_pr',
+  'pr',
   `Create a GitHub pull request from the current branch. Reads recent commit messages
 to build the PR body. Supports assigning reviewers, linking issues, and setting labels.
 Uses the gh CLI — requires GitHub CLI to be installed and authenticated.`,
@@ -2030,7 +2097,7 @@ Uses the gh CLI — requires GitHub CLI to be installed and authenticated.`,
 );
 
 server.tool(
-  'brain_clean_branches',
+  'clean_branches',
   `Prune local branches whose upstream is gone (merged/dead branches), and clean up
 unused git worktrees. Requires no arguments — safely identifies stale branches
 and reports what would be deleted before acting.`,
@@ -2175,7 +2242,7 @@ const SECURITY_PATTERNS = [
 ];
 
 server.tool(
-  'brain_security_scan',
+  'security_scan',
   `Scan modified files for common security vulnerabilities. Checks for: hardcoded credentials,
 API keys, GitHub tokens, eval/exec injection, pickle deserialization, XSS via innerHTML,
 GitHub Actions injection vectors (\${'{{{'} github.event.* }} without sanitization), SQL injection,
@@ -2306,7 +2373,7 @@ Use the notify parameter to DM agents responsible for files with findings.`,
 // ═══════════════════════════════════════
 
 server.tool(
-  'brain_feature_dev',
+  'feature_dev',
   `Kick off a structured multi-phase feature development workflow using existing brain primitives.
 Sets up a task DAG, spawns agents for parallel work, runs the integration gate between phases,
 and repeats until the feature is complete. One call replaces the manual: plan → spawn → monitor → gate loop.
@@ -2445,13 +2512,13 @@ agents are DM'd their specific errors and given time to fix before retry.`,
           models: Object.fromEntries(modelOverrides),
           message: `Feature dev plan created: ${planTasks.map(t => t.name).join(' → ')}.
 Run brain_plan_next to get the first ready tasks, then brain_wake for each agent.
-Use brain_gate between phases, brain_auto_gate for continuous quality checks.
-Monitor with brain_agents and brain_plan_status.`,
+Use gate between phases, auto_gate for continuous quality checks.
+Monitor with agents and plan_status.`,
           instructions: {
-            step_1: 'brain_plan_next — get the first ready tasks (foundation)',
-            step_2: 'brain_wake for each agent with the task from brain_get feature_dev:<agent>:task',
-            step_3: 'brain_gate after each phase to verify integration',
-            step_4: 'brain_auto_gate --max_retries 3 for the quality phase',
+            step_1: 'plan_next — get the first ready tasks (foundation)',
+            step_2: 'wake for each agent with the task from get feature_dev:<agent>:task',
+            step_3: 'gate after each phase to verify integration',
+            step_4: 'auto_gate --max_retries 3 for the quality phase',
           },
         }, null, 2),
       }],

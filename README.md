@@ -18,7 +18,7 @@ Spawn parallel Hermes agents. Give them a shared brain. Ship in one command.<br>
 
 <br>
 
-[Install](#install) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [CLI](#the-hermes-brain-cli) · [Tools](#brain-tools) · [Advanced](#advanced)
+[Install](#install) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [CLI](#the-hermes-brain-cli) · [Tools](#brain-tools) · [Memory Bank](#memory-bank-persistent-context) · [Development](#development)
 
 <br>
 
@@ -656,6 +656,97 @@ From Claude Code, say *"Refactor the API with 3 agents"* — the lead splits the
 
 ---
 
+## Memory Bank (Persistent Context)
+
+brain-mcp handles coordination between agents — but it doesn't hold context between waves. Subagents are spawned, do their work, post results, and exit. The orchestrator collects everything.
+
+**The problem:** If you run 5 waves of agents, each new wave starts with zero memory of what happened before. The brain KV store is ephemeral.
+
+**The solution:** GSD-inspired memory bank pattern. One file, one source of truth, orchestrator as memory bank.
+
+```
+Orchestrator
+│
+│  MAINTAINS: ~/.hermes/.brain/STATE.md
+│
+│  PER WAVE:
+│    brain-export-context() → brain_set("task_context", $SLICE)
+│    brain_wake(agent, goal + context)
+│
+│  AFTER RESULTS:
+│    brain-read-results() → update STATE.md
+│    brain-record-done() / brain-record-decision()
+│
+└── Subagents: read context, do work, post results, exit
+```
+
+### Quick Start
+
+```bash
+# 1. Source the helper script
+source ~/brain-mcp/scripts/brain-memory.sh
+
+# 2. Initialize a session
+brain-init "my-project" "session-123"
+
+# 3. Before each wave — get context slice
+CTX=$(brain-export-context "auth" "fix login bug")
+brain_set "task_context" "$CTX"
+brain_wake "agent-1" "fix auth bug"
+
+# 4. After results — update state
+brain-record-done 1 "agent-1" "Fixed race condition in token refresh"
+brain-complete-agent "agent-1"
+
+# 5. Dump state anytime
+brain-dump
+```
+
+### State File Structure
+
+```markdown
+## Session             → Project, session ID, status
+## Current Phase       → init | planning | executing | reviewing | complete
+## Orchestrator Memory → Accumulated context (the "memory")
+## Agent Context       → Per-agent status and work tracking
+## Files Under Work    → Who is editing what (claim/release)
+## Session Log         → Wave-by-wave history for resume
+```
+
+### Key Principles
+
+| Principle | Why |
+|-----------|-----|
+| One file, not KV | STATE.md is the source of truth. brain KV is transport only. |
+| Orchestrator writes | Subagents read + propose. Orchestrator updates state. |
+| Slices, not dumps | Each agent gets only what it needs. Keep it lean. |
+| Git-diffable | STATE.md is human-readable, git-tracked, resumable. |
+| Persistent | Survives agent restarts. Brain KV does not. |
+
+### What's Included
+
+```
+skills/brain-memory-bank/    # Full skill documentation
+├── SKILL.md                 # Pattern guide + examples
+
+scripts/
+├── brain-memory.sh          # Bash helpers (source this in your workflow)
+│
+.brain/                      # (created at runtime)
+└── STATE.md                 # Persistent session state
+```
+
+### Before vs After
+
+| Without Memory Bank | With Memory Bank |
+|---------------------|------------------|
+| Wave 3 agent asks "what did wave 1 do?" | Reads STATE.md — knows exactly |
+| Orchestrator forgets blocker from wave 2 | Blockers persist in STATE.md |
+| No shared context between waves | Context accumulated across waves |
+| Agents start cold every wake | Agents get relevant context slice |
+
+---
+
 ## Development
 
 ```bash
@@ -683,6 +774,11 @@ brain-mcp/
 │   ├── db.py             # Direct SQLite access (shares brain.db)
 │   ├── gate.py           # Compiler + contract checks
 │   └── prompt.py         # Agent prompt templates
+├── skills/
+│   └── brain-memory-bank/ # GSD-style persistent context skill
+│       └── SKILL.md       # Memory bank pattern documentation
+├── scripts/
+│   └── brain-memory.sh    # Bash helpers for orchestrator workflows
 ├── benchmark.mjs         # SQLite layer benchmark (1000 iterations)
 ├── benchmark-mcp.mjs     # MCP tool layer benchmark (30 calls per tool)
 ├── setup-hermes.sh       # Full installer

@@ -342,6 +342,8 @@ Phases run sequentially. Agents within a phase run in parallel. The integration 
 | `brain_plan_next` | Get tasks whose dependencies are satisfied |
 | `brain_plan_update` | Mark task done/failed (auto-promotes dependents) |
 | `brain_plan_status` | Overall progress |
+| `brain_workflow_compile` | Turn one natural-language goal into phases, agents, file scopes, and conductor config |
+| `brain_workflow_apply` | Persist the compiled workflow into brain state + a task DAG, optionally write conductor JSON |
 
 ### Orchestration
 

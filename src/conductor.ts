@@ -64,6 +64,10 @@ interface AgentConfig {
   task?: string;       // Override task per agent
   files?: string[];    // Files this agent is responsible for
   delay?: number;      // Seconds to wait before spawning
+  role?: string;
+  acceptance?: string[];
+  depends_on?: string[];
+  workspace?: string;
 }
 
 interface PhaseConfig {
@@ -221,6 +225,7 @@ function spawnAgent(
   const agentName = agent.name;
   const agentTask = agent.task || config.task;
   const tmuxName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const workspaceCwd = agent.workspace || config.cwd;
 
   // Pre-register in DB
   db.registerSession(
@@ -259,11 +264,17 @@ function spawnAgent(
     const fileScope = agent.files?.length
       ? `\nFILE SCOPE: You are responsible for these files: ${agent.files.join(', ')}.`
       : '';
+    const roleLine = agent.role ? `\nROLE: ${agent.role}.` : '';
+    const acceptance = agent.acceptance?.length
+      ? `\nSUCCESS CRITERIA:\n${agent.acceptance.map(item => `- ${item}`).join('\n')}`
+      : '';
 
     const brainPrompt = [
       `You are "${agentName}", a focused coding agent in a multi-agent team.`,
       `You have brain MCP tools available for coordination with other agents.`,
+      roleLine,
       fileScope,
+      acceptance,
       '',
       `WHEN DONE: post a summary with brain_post, then stop.`,
     ].join('\n');
@@ -287,7 +298,7 @@ function spawnAgent(
     const brainMcpServer = join(agentsDir(), '..', 'dist', 'index.js');
 
     const piCmd = [
-      `cd ${sh(config.cwd)}`,
+      `cd ${sh(workspaceCwd)}`,
       `&&`,
       `env ${envParts.join(' ')}`,
       `pi`,
@@ -352,7 +363,7 @@ rm -f "${watcherFile}" "${systemFile}"
     const pyScript = join(agentsDir(), 'brain_agent.py');
     const pyVenv = join(agentsDir(), '.venv', 'bin', 'python3');
     const pyBin = existsSync(pyVenv) ? pyVenv : 'python3';
-    const pyCmd = `cd ${sh(config.cwd)} && env ${envParts.join(' ')} PYTHONPATH=${sh(agentsDir())} ${sh(pyBin)} ${sh(pyScript)}`;
+    const pyCmd = `cd ${sh(workspaceCwd)} && env ${envParts.join(' ')} PYTHONPATH=${sh(agentsDir())} ${sh(pyBin)} ${sh(pyScript)}`;
 
     // Spawn tmux pane
     const paneId = execSync(
@@ -396,12 +407,20 @@ rm -f "${watcherFile}"
   } else {
     // ── Claude Code mode (original) ──
     const childEnv = envParts.join(' ');
-    const claudeCmd = `cd ${sh(config.cwd)} && env ${childEnv} claude --dangerously-skip-permissions`;
+    const claudeCmd = `cd ${sh(workspaceCwd)} && env ${childEnv} claude --dangerously-skip-permissions`;
 
     // Build prompt
     const fileScope = agent.files?.length
       ? `\nFILE SCOPE: You are responsible for these files: ${agent.files.join(', ')}. Claim them with brain_claim before editing.`
       : '';
+    const roleLine = agent.role ? `\nROLE: ${agent.role}.` : '';
+    const acceptance = agent.acceptance?.length
+      ? `\nSUCCESS CRITERIA:\n${agent.acceptance.map(item => `- ${item}`).join('\n')}`
+      : '';
+    const dependencyLine = agent.depends_on?.length
+      ? `\nDEPENDENCIES: ${agent.depends_on.join(', ')}. Read shared state/messages before duplicating their work.`
+      : '';
+    const workspaceLine = workspaceCwd !== config.cwd ? `\nWORKSPACE: ${workspaceCwd}` : '';
 
     const prompt = [
       'You have brain MCP tools available (brain_register, brain_pulse, brain_post, brain_read, brain_dm, brain_inbox, brain_set, brain_get, brain_claim, brain_release, brain_claims, brain_contract_set, brain_contract_get, brain_contract_check).',
@@ -410,7 +429,11 @@ rm -f "${watcherFile}"
       '',
       `Your name: "${agentName}"`,
       `Assigned by: conductor (automated orchestration — no lead Claude session)`,
+      roleLine,
       fileScope,
+      dependencyLine,
+      workspaceLine,
+      acceptance,
       '',
       `HEARTBEAT PROTOCOL (CRITICAL):`,
       `- Call brain_pulse with status="working" and a short progress note every 2-3 tool calls`,
@@ -663,6 +686,7 @@ async function spawnPiCoreAgent(
   const agentSessionId = randomUUID();
   const agentName = agentCfg.name;
   const agentTask = agentCfg.task || config.task;
+  const workspaceCwd = agentCfg.workspace || config.cwd;
 
   // Pre-register
   db.registerSession(
@@ -680,10 +704,13 @@ async function spawnPiCoreAgent(
     db,
     sessionId: agentSessionId,
     room: config.cwd,
-    cwd: config.cwd,
+    cwd: workspaceCwd,
     model: config.model,
     timeout: config.timeout,
     files: agentCfg.files,
+    role: agentCfg.role,
+    acceptance: agentCfg.acceptance,
+    dependsOn: agentCfg.depends_on,
     onEvent: (event) => {
       // TODO: stream events to a named pipe for visibility
       if (event.type === 'agent_end') {

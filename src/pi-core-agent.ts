@@ -27,6 +27,9 @@ export interface PiCoreAgentConfig {
   model: string; // e.g. "anthropic/claude-sonnet-4-5" or "claude-sonnet-4-5"
   timeout: number; // seconds
   files?: string[];
+  role?: string;
+  acceptance?: string[];
+  dependsOn?: string[];
   onEvent?: (event: AgentEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -53,6 +56,13 @@ export async function runPiCoreAgent(config: PiCoreAgentConfig): Promise<{ exitC
   const fileScope = config.files?.length
     ? `\n\nFILE SCOPE: You are responsible for these files: ${config.files.join(', ')}.`
     : '';
+  const roleLine = config.role ? `\nROLE: ${config.role}.` : '';
+  const acceptance = config.acceptance?.length
+    ? `\n\nSUCCESS CRITERIA:\n${config.acceptance.map((item) => `- ${item}`).join('\n')}`
+    : '';
+  const dependencies = config.dependsOn?.length
+    ? `\n\nDEPENDENCIES: ${config.dependsOn.join(', ')}. Read shared state/messages before duplicating their work.`
+    : '';
 
   const taskDirective = [
     `TASK: ${config.task}`,
@@ -68,7 +78,10 @@ export async function runPiCoreAgent(config: PiCoreAgentConfig): Promise<{ exitC
       systemPrompt: [
         `You are "${config.name}", a focused coding agent working in a multi-agent team.`,
         `Your working directory is: ${config.cwd}`,
+        roleLine,
         fileScope,
+        dependencies,
+        acceptance,
         '',
         taskDirective,
       ].join('\n'),

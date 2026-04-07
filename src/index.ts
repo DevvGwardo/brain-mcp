@@ -3,15 +3,18 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { execSync, spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { BrainDB } from './db.js';
 import { runGate, runGateAndNotify } from './gate.js';
 import { createEmbeddingProvider } from './embeddings.js';
 import { TaskRouter } from './router.js';
+import { registerAutopilot, minimalAgentPrompt } from './autopilot.js';
+import { compileWorkflow } from './workflow.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
 // Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
@@ -58,8 +61,148 @@ if (embeddingProvider) db.setEmbeddingProvider(embeddingProvider);
 let sessionId: string | null = process.env.BRAIN_SESSION_ID || null;
 let spawnedAgentCount = 0;
 
+// ── Compact mode — reduce token cost of tool responses ──
+// Enable via BRAIN_COMPACT=1 env var, or toggle at runtime via the `compact` tool.
+// Write ops return {ok:1} instead of echoing back data the agent already knows.
+// Read ops skip pretty-printing. Saves 30-80% tokens per tool call.
+let compactMode = process.env.BRAIN_COMPACT === '1' || process.env.BRAIN_COMPACT === 'true';
+
+/** Format a tool response. In compact mode, uses terse version if provided. */
+function reply(data: any, compactData?: any): { content: [{ type: 'text'; text: string }] } {
+  const payload = compactMode && compactData !== undefined ? compactData : data;
+  const text = compactMode ? JSON.stringify(payload) : JSON.stringify(payload, null, 2);
+  return { content: [{ type: 'text' as const, text }] };
+}
+
+/** Shorthand for write-op acknowledgements. */
+function ack(extra?: Record<string, any>): { content: [{ type: 'text'; text: string }] } {
+  return reply({ ok: true, ...extra }, { ok: 1, ...extra });
+}
+
 function sh(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function compileWorkflowForRoom(
+  goal: string,
+  options: {
+    max_agents?: number;
+    mode?: 'claude' | 'py' | 'pi' | 'pi-core';
+    available_models?: string[];
+    focus_files?: string[];
+    auto_route_models?: boolean;
+  } = {},
+) {
+  const router = new TaskRouter(db, room);
+  return compileWorkflow(goal, {
+    cwd: room,
+    mode: options.mode,
+    max_agents: options.max_agents,
+    focus_files: options.focus_files,
+    recommendModel: options.auto_route_models === false
+      ? undefined
+      : (task, role) => {
+        const rec = router.routeTask(task, { available_models: options.available_models });
+        return {
+          model: rec.model,
+          confidence: rec.confidence,
+          reasoning: `[${role}] ${rec.reasoning}`,
+        };
+      },
+  });
+}
+
+type IsolationMode = 'shared' | 'snapshot';
+
+function sanitizeName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'agent';
+}
+
+function prepareAgentWorkspace(baseCwd: string, agentName: string, isolation: IsolationMode): string {
+  if (isolation === 'shared') return baseCwd;
+
+  const isolatedRoot = join(tmpdir(), 'brain-isolated-workspaces');
+  mkdirSync(isolatedRoot, { recursive: true });
+  const workspacePath = join(isolatedRoot, `${Date.now()}-${sanitizeName(agentName)}`);
+
+  cpSync(baseCwd, workspacePath, {
+    recursive: true,
+    force: true,
+    filter: (src) => {
+      const name = basename(src);
+      return !['node_modules', '.git', '.DS_Store', '.cron-logs'].includes(name);
+    },
+  });
+
+  for (const sharedName of ['node_modules', '.venv', 'venv']) {
+    const source = join(baseCwd, sharedName);
+    const target = join(workspacePath, sharedName);
+    if (!existsSync(source) || existsSync(target)) continue;
+    const type = lstatSync(source).isDirectory() ? 'dir' : 'file';
+    symlinkSync(source, target, type as 'dir' | 'file');
+  }
+
+  return workspacePath;
+}
+
+function persistCompiledWorkflow(
+  sid: string,
+  compiled: ReturnType<typeof compileWorkflowForRoom>,
+  configPath?: string,
+) {
+  const plan = db.createPlan(
+    room,
+    compiled.tasks.map((task) => ({
+      name: task.name,
+      description: task.description,
+      depends_on: task.depends_on,
+      agent_name: task.agent_name,
+    })),
+  );
+
+  const workflowState = {
+    plan_id: plan.plan_id,
+    applied_at: new Date().toISOString(),
+    applied_by: sessionName,
+    ...compiled,
+  };
+
+  const stateKeys = [
+    'workflow:latest',
+    `workflow:${plan.plan_id}`,
+    `workflow:${plan.plan_id}:config`,
+  ];
+
+  db.setState(
+    'workflow:latest',
+    room,
+    JSON.stringify({ plan_id: plan.plan_id, kind: compiled.kind, goal: compiled.goal }),
+    sid,
+    sessionName,
+  );
+  db.setState(`workflow:${plan.plan_id}`, room, JSON.stringify(workflowState), sid, sessionName);
+  db.setState(`workflow:${plan.plan_id}:config`, room, JSON.stringify(compiled.conductor_config), sid, sessionName);
+
+  for (const phase of compiled.phases) {
+    for (const agent of phase.agents) {
+      const key = `workflow:${plan.plan_id}:agent:${agent.name}`;
+      stateKeys.push(key);
+      db.setState(key, room, JSON.stringify(agent), sid, sessionName);
+    }
+  }
+
+  let writtenConfigPath: string | undefined;
+  if (configPath) {
+    writtenConfigPath = resolve(room, configPath);
+    writeFileSync(writtenConfigPath, `${JSON.stringify(compiled.conductor_config, null, 2)}\n`);
+  }
+
+  return {
+    plan_id: plan.plan_id,
+    ready_tasks: db.getReadyTasks(room, plan.plan_id),
+    state_keys: stateKeys,
+    config_path: writtenConfigPath,
+  };
 }
 
 // Colors for each spawned agent pane border (cycles through these)
@@ -187,7 +330,36 @@ PERFORMANCE TRACKING:
 - brain_metric_record — record outcome after a task completes
 - Use this data to optimize: which models for which tasks, which patterns work
 
-IMPORTANT: Do NOT fall back to the built-in Agent tool when the user asks for parallel agents or brain_wake. Use these brain tools instead — they spawn visible, independent sessions that the user can watch.`,
+IMPORTANT: Do NOT fall back to the built-in Agent tool when the user asks for parallel agents or brain_wake. Use these brain tools instead — they spawn visible, independent sessions that the user can watch.
+
+SIMPLIFIED INTERFACE: The "brain" meta-tool wraps all coordination into one tool call with an action parameter.
+Spawned agents should use brain(action=...) instead of individual tools. It handles heartbeats, file locking, and checkpoints automatically.`,
+  }
+);
+
+// ═══════════════════════════════════════
+//  Autopilot Meta-Tool (simplified interface for LLMs)
+// ═══════════════════════════════════════
+
+registerAutopilot(server, db, room, () => ensureSession(), () => sessionName);
+
+// ═══════════════════════════════════════
+//  Compact Mode Toggle
+// ═══════════════════════════════════════
+
+server.tool(
+  'compact',
+  `Toggle compact response mode to reduce token cost. In compact mode:
+- Write operations return {ok:1} instead of echoing data back
+- Read operations skip pretty-printing
+- Saves 30-80% tokens per tool call, significant over a long session.
+Call with enabled=true at the start of a session to save tokens.`,
+  {
+    enabled: cBool().optional().describe('Enable (true) or disable (false) compact mode. Omit to toggle.'),
+  },
+  async ({ enabled }) => {
+    compactMode = enabled !== undefined ? enabled : !compactMode;
+    return reply({ compact: compactMode }, { c: compactMode ? 1 : 0 });
   }
 );
 
@@ -208,9 +380,7 @@ server.tool(
     } else {
       sessionId = db.registerSession(name, room);
     }
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ sessionId, name, room, roomLabel }, null, 2) }],
-    };
+    return reply({ sessionId, name, room, roomLabel }, { ok: 1, name });
   }
 );
 
@@ -223,9 +393,7 @@ server.tool(
   async ({ all_rooms }) => {
     ensureSession();
     const sessions = db.getSessions(all_rooms ? undefined : room);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(sessions, null, 2) }],
-    };
+    return reply(sessions);
   }
 );
 
@@ -237,17 +405,10 @@ server.tool(
     const self = db.getSession(sid);
     const allSessions = db.getSessions();
     const roomSessions = db.getSessions(room);
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          self,
-          room,
-          roomLabel,
-          sessions: { total: allSessions.length, inRoom: roomSessions.length },
-        }, null, 2),
-      }],
-    };
+    return reply(
+      { self, room, roomLabel, sessions: { total: allSessions.length, inRoom: roomSessions.length } },
+      { name: self?.name, room: roomLabel, agents: roomSessions.length },
+    );
   }
 );
 
@@ -270,17 +431,11 @@ server.tool(
     }
     // Auto-consume unread DMs so agents stay coordinated without extra calls
     const pending = db.consumeInbox(sid);
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          ok: true,
-          status,
-          progress,
-          pending_messages: pending.length > 0 ? pending : undefined,
-        }, null, 2),
-      }],
-    };
+    const dm = pending.length > 0 ? pending : undefined;
+    return reply(
+      { ok: true, status, progress, pending_messages: dm },
+      dm ? { ok: 1, dm: dm.map(m => `${m.from_name}: ${m.content}`) } : { ok: 1 },
+    );
   }
 );
 
@@ -294,7 +449,7 @@ server.tool(
     ensureSession();
     const agents = db.getAgentHealth(room);
     const filtered = (include_stale !== false) ? agents : agents.filter(a => !a.is_stale);
-    const summary = {
+    const agentSummary = {
       total: filtered.length,
       working: filtered.filter(a => a.status === 'working' && !a.is_stale).length,
       done: filtered.filter(a => a.status === 'done').length,
@@ -302,9 +457,11 @@ server.tool(
       stale: filtered.filter(a => a.is_stale).length,
       agents: filtered,
     };
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(summary, null, 2) }],
-    };
+    // Compact: just name+status, drop all the detail
+    return reply(agentSummary, {
+      ...agentSummary,
+      agents: filtered.map(a => ({ n: a.name, s: a.status, p: a.progress })),
+    });
   }
 );
 
@@ -323,9 +480,7 @@ server.tool(
     const sid = ensureSession();
     const ch = channel || 'general';
     const id = db.postMessage(ch, room, sid, sessionName, content);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ messageId: id, channel: ch, room: roomLabel }) }],
-    };
+    return ack({ messageId: id });
   }
 );
 
@@ -340,9 +495,7 @@ server.tool(
   async ({ channel, since_id, limit }) => {
     ensureSession();
     const messages = db.getMessages(channel || 'general', room, since_id, limit);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(messages, null, 2) }],
-    };
+    return reply(messages);
   }
 );
 
@@ -365,9 +518,7 @@ server.tool(
     const byName = sessions.find(s => s.name === to);
     if (byName) targetId = byName.id;
     const id = db.sendDM(sid, sessionName, targetId, content);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ messageId: id, to: targetId }) }],
-    };
+    return ack({ to: targetId });
   }
 );
 
@@ -380,9 +531,7 @@ server.tool(
   async ({ since_id }) => {
     const sid = ensureSession();
     const messages = db.getInbox(sid, since_id);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(messages, null, 2) }],
-    };
+    return reply(messages);
   }
 );
 
@@ -402,9 +551,7 @@ server.tool(
     const sid = ensureSession();
     const s = scope || room;
     db.setState(key, s, value, sid, sessionName);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, key, scope: s }) }],
-    };
+    return ack();
   }
 );
 
@@ -419,21 +566,11 @@ server.tool(
     ensureSession();
     const s = scope || room;
     const entry = db.getState(key, s);
-    if (!entry) {
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ found: false, key, scope: s }) }] };
-    }
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          found: true,
-          key,
-          value: entry.value,
-          updated_by: entry.updated_by_name,
-          updated_at: entry.updated_at,
-        }, null, 2),
-      }],
-    };
+    if (!entry) return reply({ found: false, key }, { v: null });
+    return reply(
+      { found: true, key, value: entry.value, updated_by: entry.updated_by_name, updated_at: entry.updated_at },
+      { v: entry.value },
+    );
   }
 );
 
@@ -570,9 +707,7 @@ server.tool(
   async ({ resource, ttl }) => {
     const sid = ensureSession();
     const result = db.claim(resource, sid, sessionName, room, ttl);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(result) }],
-    };
+    return reply(result, result.claimed ? { ok: 1 } : { no: result.owner });
   }
 );
 
@@ -585,9 +720,7 @@ server.tool(
   async ({ resource }) => {
     const sid = ensureSession();
     const released = db.release(resource, sid);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ released, resource }) }],
-    };
+    return reply({ released, resource }, { ok: released ? 1 : 0 });
   }
 );
 
@@ -600,9 +733,7 @@ server.tool(
   async ({ current_room }) => {
     ensureSession();
     const claims = db.getClaims(current_room ? room : undefined);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(claims, null, 2) }],
-    };
+    return reply(claims);
   }
 );
 
@@ -765,9 +896,7 @@ Call this after every significant action — it's cheap and saves you from losin
   async ({ entry_type, summary, detail, file_path, tags }) => {
     const sid = ensureSession();
     const id = db.pushContext(room, sid, sessionName, entry_type, summary, detail, file_path, tags);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, id, entry_type, summary }) }],
-    };
+    return ack({ id });
   }
 );
 
@@ -786,19 +915,23 @@ Filter by type, file, or session to get exactly what you need.`,
   async ({ entry_type, file_path, session_id, since_id, limit }) => {
     ensureSession();
     const entries = db.getContext(room, { entry_type, file_path, session_id, since_id, limit });
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          count: entries.length,
-          entries: entries.map(e => ({
-            id: e.id, type: e.entry_type, summary: e.summary,
-            detail: e.detail, file: e.file_path, agent: e.agent_name,
-            at: e.created_at,
-          })),
-        }, null, 2),
-      }],
+    const data = {
+      count: entries.length,
+      entries: entries.map(e => ({
+        id: e.id, type: e.entry_type, summary: e.summary,
+        detail: e.detail, file: e.file_path, agent: e.agent_name,
+        at: e.created_at,
+      })),
     };
+    // Compact: drop detail and agent fields, drop timestamps
+    const compact = {
+      count: entries.length,
+      entries: entries.map(e => ({
+        id: e.id, t: e.entry_type, s: e.summary,
+        ...(e.file_path ? { f: e.file_path } : {}),
+      })),
+    };
+    return reply(data, compact);
   }
 );
 
@@ -813,20 +946,21 @@ or context compression.`,
   async ({ session_id }) => {
     ensureSession();
     const summary = db.getContextSummary(room, session_id);
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          total_entries: summary.total,
-          by_type: summary.by_type,
-          files_touched: summary.files_touched,
-          recent: summary.recent.map(e => ({
-            id: e.id, type: e.entry_type, summary: e.summary,
-            file: e.file_path, at: e.created_at,
-          })),
-        }, null, 2),
-      }],
+    const data = {
+      total_entries: summary.total,
+      by_type: summary.by_type,
+      files_touched: summary.files_touched,
+      recent: summary.recent.map(e => ({
+        id: e.id, type: e.entry_type, summary: e.summary,
+        file: e.file_path, at: e.created_at,
+      })),
     };
+    // Compact: drop recent entries (agent can call context_get if needed)
+    return reply(data, {
+      total: summary.total,
+      types: summary.by_type,
+      files: summary.files_touched,
+    });
   }
 );
 
@@ -845,16 +979,19 @@ If you later lose track of what you're doing, brain_checkpoint_restore brings it
   },
   async ({ current_task, files_touched, decisions, progress_summary, blockers, next_steps }) => {
     const sid = ensureSession();
+    const checkpointEntryId = db.pushContext(
+      room,
+      sid,
+      sessionName,
+      'checkpoint',
+      `Checkpoint: ${progress_summary}`,
+      JSON.stringify({ current_task, decisions, next_steps }),
+    );
     const id = db.saveCheckpoint(room, sid, sessionName, {
       current_task, files_touched, decisions, progress_summary,
       blockers: blockers || [], next_steps,
-    });
-    // Also push to context ledger
-    db.pushContext(room, sid, sessionName, 'checkpoint', `Checkpoint: ${progress_summary}`,
-      JSON.stringify({ current_task, decisions, next_steps }));
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, checkpoint_id: id, message: 'Checkpoint saved. Use brain_checkpoint_restore to recover this state.' }) }],
-    };
+    }, checkpointEntryId);
+    return ack({ checkpoint_id: id });
   }
 );
 
@@ -870,28 +1007,33 @@ Returns your last known state: current task, files touched, decisions made, prog
     ensureSession();
     const checkpoint = db.restoreCheckpoint(room, session_id);
     if (!checkpoint) {
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ found: false, message: 'No checkpoint found. Use brain_context_get to review the ledger instead.' }) }],
-      };
+      return reply(
+        { found: false, message: 'No checkpoint found. Use context_get to review the ledger instead.' },
+        { found: false },
+      );
     }
     const state = JSON.parse(checkpoint.state);
-    // Also get recent context entries since the checkpoint
-    const recentContext = db.getContext(room, { session_id: checkpoint.session_id, limit: 10 });
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          found: true,
-          checkpoint_id: checkpoint.id,
-          agent: checkpoint.agent_name,
-          saved_at: checkpoint.created_at,
-          state,
-          recent_activity: recentContext.map(e => ({
-            type: e.entry_type, summary: e.summary, file: e.file_path,
-          })),
-        }, null, 2),
-      }],
+    // Also get room-wide context written AFTER the checkpoint so recovery includes
+    // what other agents learned while this session was away.
+    const recentContext = checkpoint.ledger_entry_id
+      ? db.getContext(room, { since_id: checkpoint.ledger_entry_id, limit: 10, order: 'asc' })
+      : db.getContext(room, { since_created_at: checkpoint.created_at, limit: 10, order: 'asc' });
+    const data = {
+      found: true,
+      checkpoint_id: checkpoint.id,
+      agent: checkpoint.agent_name,
+      saved_at: checkpoint.created_at,
+      state,
+      recent_activity: recentContext.map(e => ({
+        type: e.entry_type, summary: e.summary, file: e.file_path,
+      })),
     };
+    // Compact: keep full state (that's the whole point) but drop metadata
+    return reply(data, {
+      found: true,
+      state,
+      recent: recentContext.map(e => ({ t: e.entry_type, s: e.summary })),
+    });
   }
 );
 
@@ -912,11 +1054,16 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
       task: z.string().describe('Specific task for this agent'),
       files: cArr(z.string()).optional().describe('Files this agent is responsible for'),
       model: z.string().optional().describe('Model override for this agent'),
+      role: z.string().optional().describe('Role template for this agent (e.g. "integration-owner")'),
+      acceptance: cArr(z.string()).optional().describe('Success criteria this agent should satisfy before marking done'),
+      depends_on: cArr(z.string()).optional().describe('Other agent names whose outputs this agent should respect'),
+      isolation: z.enum(['shared', 'snapshot']).optional().describe('Run this agent in the shared workspace or an isolated snapshot (default: shared)'),
     })).describe('Array of agents to spawn'),
     layout: z.enum(['horizontal', 'tiled', 'headless']).optional().describe('Layout for all agents (default: headless)'),
     model: z.string().optional().describe('Default model for all agents'),
+    isolation: z.enum(['shared', 'snapshot']).optional().describe('Default workspace isolation for spawned agents (default: shared)'),
   },
-  async ({ task, agents: agentConfigs, layout, model: defaultModel }) => {
+  async ({ task, agents: agentConfigs, layout, model: defaultModel, isolation }) => {
     const sid = ensureSession();
     startLeadWatchdog(sid);
 
@@ -927,13 +1074,14 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
     db.setState('swarm-task', room, task, sid, sessionName);
 
     // Spawn all agents
-    const spawned: Array<{ name: string; sessionId: string; taskId: number }> = [];
+    const spawned: Array<{ name: string; sessionId: string; taskId: number; workspace: string }> = [];
     const errors: string[] = [];
 
     for (const agentCfg of agentConfigs) {
       try {
         const agentSessionId = randomUUID();
         const agentName = agentCfg.name;
+        const workspacePath = prepareAgentWorkspace(room, agentName, agentCfg.isolation || isolation || 'shared');
 
         // Post task for audit trail
         const taskId = db.postMessage('tasks', room, sid, sessionName, agentCfg.task);
@@ -941,7 +1089,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
         // Pre-register
         db.registerSession(
           agentName, room,
-          JSON.stringify({ parent_session_id: sid, task_id: taskId, swarm: true }),
+          JSON.stringify({ parent_session_id: sid, task_id: taskId, swarm: true, workspace: workspacePath }),
           agentSessionId,
         );
         db.pulse(agentSessionId, 'working', 'spawned by swarm; initializing');
@@ -959,28 +1107,15 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           (cliBase === 'claude' || cliBase.includes('claude')) ? 'claude' :
           (cliBase === 'hermes' || cliBase.includes('hermes')) ? 'hermes' :
           'other';
-        const toolPrefix = cliType === 'hermes' ? 'mcp_brain_' : '';
 
-        // Build prompt
-        const fileScope = agentCfg.files?.length
-          ? `\nFILE SCOPE: You own these files: ${agentCfg.files.join(', ')}. Use ${toolPrefix}brain_claim on each before editing.\n`
-          : '';
-
-        const prompt = [
-          cliType === 'hermes'
-            ? 'You have brain MCP tools via the "brain" server (mcp_brain_brain_pulse, mcp_brain_brain_claim, mcp_brain_brain_release, mcp_brain_brain_post, mcp_brain_brain_contract_set, mcp_brain_brain_contract_get, mcp_brain_brain_contract_check, mcp_brain_brain_remember, mcp_brain_brain_recall).'
-            : 'You have brain MCP tools (brain_pulse, brain_claim, brain_release, brain_post, brain_contract_set, brain_contract_get, brain_contract_check, brain_remember, brain_recall).',
-          fileScope,
-          `Your name: "${agentName}"`,
-          `Call ${toolPrefix}brain_pulse with status="working" every 2-3 tool calls.`,
-          `Use ${toolPrefix}brain_claim before editing files, ${toolPrefix}brain_release when done.`,
-          `Check ${toolPrefix}brain_contract_get before coding, publish with ${toolPrefix}brain_contract_set after.`,
-          '',
-          `YOUR TASK:`,
-          agentCfg.task,
-          '',
-          `WHEN DONE: ${toolPrefix}brain_contract_check, then ${toolPrefix}brain_pulse status="done", then ${toolPrefix}brain_post your summary, then ${toolPrefix}brain_release all files.`,
-        ].join('\n');
+        // Use minimal autopilot prompt — works for ALL CLIs
+        const prompt = minimalAgentPrompt(agentName, agentCfg.task, {
+          files: agentCfg.files,
+          role: agentCfg.role,
+          acceptance: agentCfg.acceptance,
+          dependsOn: agentCfg.depends_on,
+          workspacePath,
+        });
 
         // Spawn headless
         const childEnv = childEnvParts.join(' ');
@@ -992,12 +1127,12 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
         let headlessCmd: string;
         if (cliType === 'claude') {
           const modelFlag = agentModel ? ` --model ${sh(agentModel)}` : '';
-          headlessCmd = `cd ${sh(room)} && env ${childEnv} claude -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
+          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} claude -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
         } else if (cliType === 'hermes') {
           const hermesModelEnv = agentModel ? `HERMES_MODEL=${sh(agentModel)}` : '';
-          headlessCmd = `cd ${sh(room)} && env ${childEnv} ${hermesModelEnv} hermes chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
+          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
         } else {
-          headlessCmd = `cd ${sh(room)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
+          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
         }
 
         // For tmux modes, use brain_wake's tmux logic
@@ -1015,7 +1150,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
         const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
         watcher.unref();
 
-        spawned.push({ name: agentName, sessionId: agentSessionId, taskId });
+        spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
       } catch (err: any) {
         errors.push(`${agentCfg.name}: ${err.message}`);
       }
@@ -1028,7 +1163,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           ok: errors.length === 0,
           spawned: spawned.length,
           failed: errors.length,
-          agents: spawned.map(s => ({ name: s.name, sessionId: s.sessionId })),
+          agents: spawned.map((s) => ({ name: s.name, sessionId: s.sessionId, workspace: s.workspace })),
           errors: errors.length > 0 ? errors : undefined,
           cli: cliBase,
           message: `Swarm launched: ${spawned.length} agents spawned${errors.length ? `, ${errors.length} failed` : ''}. Monitor with brain_agents. Run brain_auto_gate when all agents report done.`,
@@ -1055,9 +1190,7 @@ Unlike brain_set (ephemeral shared state), memories survive brain_clear and are 
   async ({ key, content, category }) => {
     const sid = ensureSession();
     const id = db.storeMemory(room, key, content, category || 'general', sid, sessionName);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, id, key, category: category || 'general', message: 'Memory stored. Future agents can recall this.' }) }],
-    };
+    return ack({ id });
   }
 );
 
@@ -1074,24 +1207,21 @@ Always check memory at the start of a task — previous agents may have discover
     ensureSession();
     const memories = await db.recallMemory(room, query, category, limit);
     const categories = db.listMemoryCategories(room);
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          count: memories.length,
-          categories,
-          memories: memories.map(m => ({
-            id: m.id,
-            key: m.key,
-            content: m.content,
-            category: m.category,
-            access_count: m.access_count,
-            created_by: m.created_by_name,
-            updated_at: m.updated_at,
-          })),
-        }, null, 2),
-      }],
+    const data = {
+      count: memories.length,
+      categories,
+      memories: memories.map(m => ({
+        id: m.id, key: m.key, content: m.content,
+        category: m.category, access_count: m.access_count,
+        created_by: m.created_by_name, updated_at: m.updated_at,
+      })),
     };
+    // Compact: drop metadata, keep key+content which is what matters
+    return reply(data, {
+      count: memories.length,
+      categories,
+      memories: memories.map(m => ({ key: m.key, content: m.content, cat: m.category })),
+    });
   }
 );
 
@@ -1104,9 +1234,7 @@ server.tool(
   async ({ key }) => {
     ensureSession();
     const removed = db.forgetMemoryByKey(room, key);
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ removed, key }) }],
-    };
+    return reply({ removed, key }, { ok: removed ? 1 : 0 });
   }
 );
 
@@ -1224,6 +1352,213 @@ server.tool(
     const plans = db.getPlans(room);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify({ plans }, null, 2) }],
+    };
+  }
+);
+
+// ═══════════════════════════════════════
+//  Workflow Compiler — goal -> agent workflow
+// ═══════════════════════════════════════
+
+server.tool(
+  'workflow_compile',
+  `Compile a natural-language goal into a reusable multi-agent workflow.
+This is the AutoAgent-style planning layer for brain-mcp: it classifies the goal, chooses
+agent roles, assigns file scopes, suggests models, and emits both a task DAG and conductor-ready
+pipeline config without spawning anything yet.`,
+  {
+    goal: z.string().describe('High-level goal to turn into a workflow'),
+    max_agents: cNum().optional().describe('Soft cap for the number of agents in the compiled workflow (default: 4, max: 6).'),
+    mode: z.enum(['claude', 'py', 'pi', 'pi-core']).optional().describe('Preferred execution mode for the generated conductor config (default: pi-core).'),
+    available_models: cArr(z.string()).optional().describe('Optional list of models available for auto-routing.'),
+    focus_files: cArr(z.string()).optional().describe('Optional file or directory hints to bias scope assignment.'),
+    auto_route_models: cBool().optional().describe('Suggest per-agent models using historical metrics when available (default: true).'),
+  },
+  async ({ goal, max_agents, mode, available_models, focus_files, auto_route_models }) => {
+    ensureSession();
+    const compiled = compileWorkflowForRoom(goal, {
+      max_agents,
+      mode,
+      available_models,
+      focus_files,
+      auto_route_models,
+    });
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify(compiled, null, 2),
+      }],
+    };
+  }
+);
+
+server.tool(
+  'workflow_apply',
+  `Compile a natural-language goal into a brain plan and persist the workflow metadata.
+Writes the compiled workflow into brain state, creates a dependency-aware task DAG, and can
+optionally write a conductor JSON config file. Use this when you want a workflow you can execute,
+not just preview.`,
+  {
+    goal: z.string().describe('High-level goal to turn into a workflow'),
+    max_agents: cNum().optional().describe('Soft cap for the number of agents in the compiled workflow (default: 4, max: 6).'),
+    mode: z.enum(['claude', 'py', 'pi', 'pi-core']).optional().describe('Preferred execution mode for the generated conductor config (default: pi-core).'),
+    available_models: cArr(z.string()).optional().describe('Optional list of models available for auto-routing.'),
+    focus_files: cArr(z.string()).optional().describe('Optional file or directory hints to bias scope assignment.'),
+    auto_route_models: cBool().optional().describe('Suggest per-agent models using historical metrics when available (default: true).'),
+    config_path: z.string().optional().describe('Optional JSON file path to write the generated conductor config. Relative paths are resolved from the current room.'),
+  },
+  async ({ goal, max_agents, mode, available_models, focus_files, auto_route_models, config_path }) => {
+    const sid = ensureSession();
+    const compiled = compileWorkflowForRoom(goal, {
+      max_agents,
+      mode,
+      available_models,
+      focus_files,
+      auto_route_models,
+    });
+    const persisted = persistCompiledWorkflow(sid, compiled, config_path);
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({
+          ok: true,
+          plan_id: persisted.plan_id,
+          workflow_kind: compiled.kind,
+          summary: compiled.summary,
+          phases: compiled.phases.map((phase) => ({
+            name: phase.name,
+            parallel: phase.parallel,
+            agents: phase.agents.map((agent) => ({
+              name: agent.name,
+              role: agent.role,
+              model: agent.model,
+            })),
+          })),
+          ready_tasks: persisted.ready_tasks.map((task) => ({
+            id: task.id,
+            name: task.name,
+            description: task.description,
+            agent_name: task.agent_name,
+          })),
+          config_path: persisted.config_path,
+          state_keys: persisted.state_keys,
+          next_steps: [
+            `plan_next with plan_id=${persisted.plan_id}`,
+            persisted.config_path ? `brain-conductor --config ${persisted.config_path}` : 'Use the stored workflow:* state or conductor config payload to start execution',
+            'brain_wake or brain_swarm using the persisted agent task specs if you want manual control',
+          ],
+        }, null, 2),
+      }],
+    };
+  }
+);
+
+server.tool(
+  'workflow_run',
+  `Compile a goal into a workflow, persist it, and launch the Node conductor in the background.
+This is the end-to-end entrypoint for AutoAgent-style orchestration inside brain-mcp.
+It writes a conductor config, starts execution, and returns the plan/config/log locations so you can
+monitor progress with brain_agents, brain_plan_status, and the log file.`,
+  {
+    goal: z.string().describe('High-level goal to turn into an executing workflow'),
+    max_agents: cNum().optional().describe('Soft cap for the number of agents in the compiled workflow (default: 4, max: 6).'),
+    mode: z.enum(['claude', 'py', 'pi', 'pi-core']).optional().describe('Execution mode for the launched conductor (default: pi-core).'),
+    available_models: cArr(z.string()).optional().describe('Optional list of models available for auto-routing.'),
+    focus_files: cArr(z.string()).optional().describe('Optional file or directory hints to bias scope assignment.'),
+    auto_route_models: cBool().optional().describe('Suggest per-agent models using historical metrics when available (default: true).'),
+    isolation: z.enum(['shared', 'snapshot']).optional().describe('Use the shared workspace or generate isolated snapshot workspaces per agent (default: shared).'),
+    config_path: z.string().optional().describe('Optional JSON file path to write the generated conductor config. Relative paths are resolved from the current room.'),
+    log_path: z.string().optional().describe('Optional log file path for the launched conductor. Relative paths are resolved from the current room.'),
+  },
+  async ({ goal, max_agents, mode, available_models, focus_files, auto_route_models, isolation, config_path, log_path }) => {
+    const sid = ensureSession();
+    startLeadWatchdog(sid);
+
+    if (mode && mode !== 'pi-core') {
+      try {
+        execSync('tmux display-message -p ""', { stdio: 'ignore' });
+      } catch {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: 'workflow_run with claude/pi/py mode requires tmux. Use mode="pi-core" or run inside tmux.' }) }],
+          isError: true,
+        };
+      }
+    }
+
+    const compiled = compileWorkflowForRoom(goal, {
+      max_agents,
+      mode,
+      available_models,
+      focus_files,
+      auto_route_models,
+    });
+
+    const isolationMode = isolation || 'shared';
+    if (isolationMode === 'snapshot') {
+      compiled.conductor_config.phases = compiled.conductor_config.phases.map((phase) => ({
+        ...phase,
+        agents: phase.agents.map((agent) => ({
+          ...agent,
+          workspace: prepareAgentWorkspace(room, agent.name, 'snapshot'),
+        })),
+      }));
+    }
+
+    const defaultConfigPath = join(tmpdir(), `brain-workflow-${Date.now()}.json`);
+    const persisted = persistCompiledWorkflow(sid, compiled, config_path || defaultConfigPath);
+    const configFile = persisted.config_path || resolve(room, config_path || defaultConfigPath);
+    const conductorPath = fileURLToPath(new URL('./conductor.js', import.meta.url));
+    const logFile = resolve(room, log_path || join(tmpdir(), `brain-workflow-${persisted.plan_id}.log`));
+    const logFd = openSync(logFile, 'a');
+    const child = spawn('node', [conductorPath, '--config', configFile], {
+      cwd: room,
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: {
+        ...process.env,
+        BRAIN_DB_PATH: process.env.BRAIN_DB_PATH || '',
+        BRAIN_ROOM: room,
+      },
+    });
+    closeSync(logFd);
+    child.unref();
+
+    const runState = {
+      plan_id: persisted.plan_id,
+      pid: child.pid,
+      config_path: configFile,
+      log_path: logFile,
+      started_at: new Date().toISOString(),
+      mode: compiled.conductor_config.mode,
+      isolation: isolationMode,
+    };
+    db.setState(`workflow:${persisted.plan_id}:run`, room, JSON.stringify(runState), sid, sessionName);
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({
+          ok: true,
+          plan_id: persisted.plan_id,
+          workflow_kind: compiled.kind,
+          pid: child.pid,
+          mode: compiled.conductor_config.mode,
+          isolation: isolationMode,
+          config_path: configFile,
+          log_path: logFile,
+          ready_tasks: persisted.ready_tasks.map((task) => ({
+            id: task.id,
+            name: task.name,
+            agent_name: task.agent_name,
+          })),
+          next_steps: [
+            'Use brain_agents to monitor live agent status',
+            `Use brain_plan_status with plan_id=${persisted.plan_id} to inspect task progress`,
+            `Inspect the conductor log at ${logFile} if execution stalls`,
+          ],
+        }, null, 2),
+      }],
     };
   }
 );
@@ -1510,12 +1845,16 @@ server.tool(
     task: z.string().describe('The full task description for the new session to execute'),
     name: z.string().optional().describe('Name for the new agent session (default: "agent-<timestamp>")'),
     layout: z.enum(['vertical', 'horizontal', 'tiled', 'window', 'headless']).optional().describe('"horizontal" = side by side (default). "vertical" = stacked. "tiled" = auto-grid. "window" = new tmux tab. "headless" = background process (no tmux needed).'),
+    files: cArr(z.string()).optional().describe('Optional file scope for the agent'),
+    role: z.string().optional().describe('Optional role template to include in the prompt'),
+    acceptance: cArr(z.string()).optional().describe('Success criteria the agent should satisfy before marking done'),
+    isolation: z.enum(['shared', 'snapshot']).optional().describe('Run in the shared workspace or an isolated snapshot (default: shared)'),
     model: z.string().optional().describe('Model to use for this agent. For Claude Code: "opus", "sonnet", "haiku", or full model ID. Enables multi-LLM routing — use cheap models for boilerplate, expensive for complex logic.'),
     auto_route: cBool().optional().describe('Auto-select the best model based on task complexity and historical metrics. Ignored if model is explicitly set.'),
     timeout: cNum().optional().describe('Timeout in seconds. Default: 3600 (1 hour). Set 0 for no timeout.'),
     cli: z.string().optional().describe('Custom CLI command to spawn instead of "claude" (e.g. "codex", "aider"). The agent will still use brain tools if the CLI supports MCP.'),
   },
-  async ({ task, name, layout, model: modelParam, auto_route, timeout: timeoutSec, cli }) => {
+  async ({ task, name, layout, files, role, acceptance, isolation, model: modelParam, auto_route, timeout: timeoutSec, cli }) => {
     const sid = ensureSession();
     startLeadWatchdog(sid);
     const agentName = name || `agent-${Date.now()}`;
@@ -1524,6 +1863,7 @@ server.tool(
     const spawnLayout = layout || 'horizontal';
     const isHeadless = spawnLayout === 'headless';
     const agentTimeout = timeoutSec ?? (isHeadless ? 1800 : 3600);
+    const workspacePath = prepareAgentWorkspace(room, agentName, isolation || 'shared');
 
     // Auto-route: pick the best model based on task complexity + metrics
     let model = modelParam;
@@ -1555,7 +1895,7 @@ server.tool(
     db.registerSession(
       agentName,
       room,
-      JSON.stringify({ parent_session_id: sid, task_id: taskId, model: model || null, headless: isHeadless }),
+      JSON.stringify({ parent_session_id: sid, task_id: taskId, model: model || null, headless: isHeadless, workspace: workspacePath }),
       agentSessionId,
     );
     db.pulse(agentSessionId, 'working', 'spawned by lead; initializing');
@@ -1582,54 +1922,15 @@ server.tool(
       // Hermes uses the configured model — pass via env var
     }
 
-    // Hermes uses mcp_brain_tool_name notation for MCP tools
-    const toolPrefix = cliType === 'hermes' ? 'mcp_brain_' : '';
-
-    // Build the prompt — adapted per CLI
-    const prompt = [
-      cliType === 'hermes'
-        ? `You have brain MCP tools available via the "brain" MCP server. Call them as: mcp_brain_register, mcp_brain_pulse, mcp_brain_post, mcp_brain_read, mcp_brain_dm, mcp_brain_inbox, mcp_brain_set, mcp_brain_get, mcp_brain_claim, mcp_brain_release, mcp_brain_claims, mcp_brain_agents, mcp_brain_contract_set, mcp_brain_contract_get, mcp_brain_contract_check, mcp_brain_remember, mcp_brain_recall, mcp_brain_plan_next, mcp_brain_plan_update.`
-        : 'You have brain MCP tools available (register, pulse, sessions, post, read, dm, inbox, set, get, claim, release, claims, agents, contract_set, contract_get, contract_check, wake, remember, recall, plan_next, plan_update).',
-      '',
-      `IMPORTANT: Use ${toolPrefix}claim before editing any file, and ${toolPrefix}release when done. This prevents conflicts with other agents.`,
-      '',
-      `Your name: "${agentName}"`,
-      `Assigned by: "${sessionName}"`,
-      '',
-      `HEARTBEAT PROTOCOL (CRITICAL):`,
-      `- Call ${toolPrefix}pulse with status="working" and a short progress note every 2-3 tool calls`,
-      `- ${toolPrefix}pulse returns any pending DMs from other agents — READ AND RESPOND to them`,
-      `- If you hit a blocker, call ${toolPrefix}pulse with status="failed" and describe the issue`,
-      `- This keeps the lead informed and prevents you from being marked as stale`,
-      '',
-      `CONTRACT PROTOCOL (CRITICAL — prevents integration bugs):`,
-      `- BEFORE writing code: call ${toolPrefix}contract_get to see what other agents provide/expect`,
-      `- AFTER writing/modifying a file: call ${toolPrefix}contract_set to publish what your module provides:`,
-      `  Example: entries=[{"module":"src/ui.ts","name":"drawBattle","kind":"provides","signature":"{\"params\":[\"state: BattleState\"],\"returns\":\"void\"}"}]`,
-      `- When your code CALLS a function from another module: also publish an "expects" entry with the signature you're calling with`,
-      `- BEFORE marking done: call ${toolPrefix}contract_check to verify no mismatches exist`,
-      `- If mismatches are found: fix your code to match the published contracts, then re-check`,
-      '',
-      `MEMORY: Use ${toolPrefix}remember to store important discoveries about the codebase. Use ${toolPrefix}recall to check if previous agents learned something useful.`,
-      '',
-      `CONTEXT LEDGER (CRITICAL — prevents losing track):`,
-      `- Call ${toolPrefix}context_push after every significant action, discovery, or decision`,
-      `- Entry types: "action" (did something), "discovery" (learned something), "decision" (chose approach), "error" (hit problem), "file_change" (edited file)`,
-      `- Include the file_path when relevant`,
-      `- Call ${toolPrefix}checkpoint every 10-15 tool calls to save your full working state`,
-      `- If you feel lost or confused, call ${toolPrefix}checkpoint_restore to recover`,
-      `- This is your insurance against context compression — the ledger remembers even when you forget`,
-      '',
-      `YOUR TASK:`,
-      task,
-      '',
-      `WHEN DONE:`,
-      `1. Call ${toolPrefix}contract_check — fix any mismatches before proceeding`,
-      `2. Call ${toolPrefix}pulse with status="done" and a summary of what you accomplished`,
-      `3. Call ${toolPrefix}post to announce what you accomplished`,
-      `4. Release all claimed files with ${toolPrefix}release`,
-      `5. Exit when you are done so resources are freed`,
-    ].join('\n');
+    // Build the prompt — use minimal autopilot prompt (replaces 40+ line protocol dump)
+    // The "brain" meta-tool handles heartbeats, file locking, and checkpoints automatically.
+    // This works for ALL CLIs — no more transport-specific tool name prefixing.
+    const prompt = minimalAgentPrompt(agentName, task, {
+      files,
+      role,
+      acceptance,
+      workspacePath,
+    });
 
     const ts = Date.now();
     const promptFile = join(tmpdir(), `brain-prompt-${ts}.txt`);
@@ -1647,15 +1948,15 @@ server.tool(
         let headlessCmd: string;
         if (cliType === 'claude') {
           // claude -p (print mode) — non-interactive, uses all MCP tools, exits when done
-          headlessCmd = `cd ${sh(room)} && env ${childEnv} ${sh(cliBase)} -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
+          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)} -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
         } else if (cliType === 'hermes') {
           // hermes chat -q (single query mode) — non-interactive, uses MCP tools, exits when done
           // -Q suppresses TUI, only prints final response
           const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
-          headlessCmd = `cd ${sh(room)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
+          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
         } else {
           // Generic CLI — pass prompt via stdin
-          headlessCmd = `cd ${sh(room)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
+          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
         }
 
         // Wrapper script with timeout and cleanup
@@ -1699,6 +2000,8 @@ fi
               taskId,
               mode: 'headless',
               model: model || 'default',
+              workspace: workspacePath,
+              isolation: isolation || 'shared',
               logFile,
               message: `Spawned "${agentName}" in headless mode (no tmux). Monitor with brain_agents. Log: ${logFile}`,
             }, null, 2),
@@ -1712,13 +2015,13 @@ fi
       const childEnv = childEnvParts.join(' ');
       let tmuxCmd: string;
       if (cliType === 'claude') {
-        tmuxCmd = `cd ${sh(room)} && env ${childEnv} ${sh(cliBase)}${modelFlag} --dangerously-skip-permissions`;
+        tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}${modelFlag} --dangerously-skip-permissions`;
       } else if (cliType === 'hermes') {
         // Hermes interactive TUI mode — full agent experience in tmux pane
         const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
-        tmuxCmd = `cd ${sh(room)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)}`;
+        tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)}`;
       } else {
-        tmuxCmd = `cd ${sh(room)} && env ${childEnv} ${sh(cliBase)}`;
+        tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}`;
       }
       const bufferName = `brain-${ts}`;
 
@@ -1843,6 +2146,8 @@ rm -f "${watcherFile}"
             taskId,
             layout: spawnLayout,
             model: model || 'default',
+            workspace: workspacePath,
+            isolation: isolation || 'shared',
             message: `Spawned "${agentName}" — ${layoutDesc[spawnLayout]}. Pre-registered with heartbeat. Lead watchdog active.`,
           }, null, 2),
         }],

@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "."
+  },
+  "include": ["index.ts", "src/**/*.ts", "context-db.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "vitest.config.ts"]
+}

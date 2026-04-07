@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "bin": {
     "brain-mcp": "dist/index.js",
-    "brain-conductor": "dist/conductor.js"
+    "brain-conductor": "dist/conductor.js",
+    "brain-bridge": "dist/bridge.js"
   },
   "engines": {
     "node": ">=18"

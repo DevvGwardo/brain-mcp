@@ -42,6 +42,45 @@ const dim = (text: string) => `${C.dim}${text}${C.reset}`;
 const bold = (text: string) => `${C.bold}${text}${C.reset}`;
 const color = (text: string, c: string) => `${c}${text}${C.reset}`;
 
+const AGENT_COLOR_HEX = [
+  '#3B82F6', // blue
+  '#10B981', // emerald
+  '#F59E0B', // amber
+  '#EF4444', // red
+  '#8B5CF6', // violet
+  '#EC4899', // pink
+  '#06B6D4', // cyan
+  '#F97316', // orange
+  '#14B8A6', // teal
+  '#A855F7', // purple
+];
+
+function hexColor(hex: string): string {
+  const value = hex.replace('#', '');
+  const r = parseInt(value.slice(0, 2), 16);
+  const g = parseInt(value.slice(2, 4), 16);
+  const b = parseInt(value.slice(4, 6), 16);
+  return `\x1b[38;2;${r};${g};${b}m`;
+}
+
+function hashName(name: string): number {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function agentColor(name: string): string {
+  const label = name.trim();
+  if (!label || label === '?') return C.brightWhite;
+  return hexColor(AGENT_COLOR_HEX[hashName(label) % AGENT_COLOR_HEX.length]);
+}
+
+function agentText(name: string): string {
+  return color(name, agentColor(name));
+}
+
 // Strip all ANSI escape sequences from a string
 function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
@@ -158,7 +197,7 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
     const shown = sessions.slice(0, o.maxItems);
     for (const s of shown) {
       const sid = s.session_id ?? s.id ?? '?';
-      const name = color(s.name ?? '?', C.brightWhite);
+      const name = agentText(s.name ?? '?');
       const age = s.heartbeat_age_seconds ?? s.heartbeat_age ?? 0;
       const ageStr = age < 60 ? `${age}s ago` : `${Math.floor(age / 60)}m ago`;
       const status = s.status ?? 'idle';
@@ -173,7 +212,7 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
   brain_status(data: any, o): string {
     const lines = [`${bold('Session Status')}`];
     if (data.session_id) lines.push(`  ${bold('ID')}: ${color(data.session_id.slice(0, 12) + '...', C.cyan)}`);
-    if (data.name) lines.push(`  ${bold('Name')}: ${color(data.name, C.green)}`);
+    if (data.name) lines.push(`  ${bold('Name')}: ${agentText(data.name)}`);
     if (data.status) lines.push(`  ${bold('Status')}: ${statusIcon(data.status)} ${data.status}`);
     if (data.room) lines.push(`  ${bold('Room')}: ${data.room}`);
     if (data.agent_count !== undefined) lines.push(`  ${bold('Agents')}: ${data.agent_count}`);
@@ -212,7 +251,7 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
     const lines = [header, ''];
     const shown = agents.slice(0, o.maxItems);
     for (const a of shown) {
-      const name = color(a.name ?? '?', C.brightWhite);
+      const name = agentText(a.name ?? '?');
       const status = a.status ?? 'idle';
       const stale = a.is_stale ? ` ${color('STALE', C.red)}` : '';
       const age = a.heartbeat_age_seconds ?? 0;
@@ -236,7 +275,7 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
       return lines.join('\n');
     }
     if (data.agent_id) lines.push(`  ${bold('ID')}: ${color(data.agent_id.slice(0, 12) + '...', C.cyan)}`);
-    if (data.name) lines.push(`  ${bold('Name')}: ${color(data.name, C.green)}`);
+    if (data.name) lines.push(`  ${bold('Name')}: ${agentText(data.name)}`);
     if (data.layout) lines.push(`  ${bold('Layout')}: ${data.layout}`);
     if (data.model) lines.push(`  ${bold('Model')}: ${dim(data.model)}`);
     if (data.task) lines.push(`  ${bold('Task')}: ${dim(data.task.slice(0, 80) + (data.task.length > 80 ? '...' : ''))}`);
@@ -275,7 +314,8 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
     const lines = [`${msgs.length} message${msgs.length !== 1 ? 's' : ''} in ${bold(data.channel ?? 'general')}`, ''];
     const shown = msgs.slice(0, o.maxItems);
     for (const m of shown) {
-      const sender = color((m.sender ?? m.session_name ?? '?').padEnd(12), C.green);
+      const senderName = (m.sender ?? m.session_name ?? '?');
+      const sender = agentText(senderName.padEnd(12));
       const time = m.timestamp ? dim(new Date(m.timestamp).toLocaleTimeString()) : '';
       const content = (m.content ?? '').replace(/\n/g, ' ').slice(0, 80);
       lines.push(`  ${sender} ${time ? time + '  ' : ''}${content}`);
@@ -288,7 +328,7 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
 
   brain_dm(data: any, o): string {
     if (data.ok || data.message_id) {
-      return `DM sent to ${bold(data.target ?? '?')} — ${color('ID:', C.cyan)} ${(data.message_id ?? data.id ?? '?').slice(0, 8)}...`;
+      return `DM sent to ${bold(agentText(data.target ?? '?'))} — ${color('ID:', C.cyan)} ${(data.message_id ?? data.id ?? '?').slice(0, 8)}...`;
     }
     return color('DM failed: ' + (data.error ?? JSON.stringify(data)), C.red);
   },
@@ -301,7 +341,8 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
     const lines = [`${msgs.length} DM${msgs.length !== 1 ? 's' : ''}`, ''];
     const shown = msgs.slice(0, o.maxItems);
     for (const m of shown) {
-      const from = color((m.from ?? m.sender ?? '?').padEnd(12), C.magenta);
+      const fromName = (m.from ?? m.sender ?? '?');
+      const from = agentText(fromName.padEnd(12));
       const time = m.timestamp ? dim(new Date(m.timestamp).toLocaleTimeString()) : '';
       const content = (m.content ?? '').replace(/\n/g, ' ').slice(0, 60);
       lines.push(`  ${from} ${time ? time + '  ' : ''}${content}`);
@@ -359,7 +400,7 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
       return `${bold('Claimed')} ${color(data.resource ?? '?', C.yellow)} — ${dim('TTL: ' + (data.ttl ?? '?') + 's')}`;
     }
     if (data.held_by) {
-      return `${color('Already held', C.red)} by ${color(data.held_by, C.magenta)} (${dim(data.held_age ?? '?' + 's ago')})`;
+      return `${color('Already held', C.red)} by ${agentText(data.held_by)} (${dim(data.held_age ?? '?' + 's ago')})`;
     }
     return color('Claim failed: ' + (data.error ?? JSON.stringify(data)), C.red);
   },
@@ -380,7 +421,7 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
     const shown = claims.slice(0, o.maxItems);
     for (const c of shown) {
       const res = color(c.resource ?? '?', C.yellow);
-      const holder = color(c.held_by ?? '?', C.green);
+      const holder = agentText(c.held_by ?? '?');
       const ttl = c.ttl ?? c.ttl_seconds ?? '?';
       lines.push(`  ${color('🔒', C.yellow)} ${res}  held by ${holder}  ${dim(`TTL: ${ttl}s`)}`);
     }
@@ -537,7 +578,7 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
     for (const t of tasks.slice(0, o.maxItems)) {
       const name = color(t.name ?? '?', C.green);
       const desc = dim((t.description ?? '').slice(0, 70));
-      const agent = t.agent_name ? ` ${dim('<- ' + t.agent_name)}` : '';
+      const agent = t.agent_name ? ` ${dim('<- ')}${agentText(t.agent_name)}` : '';
       lines.push(`  ${statusIcon('ready')} ${bold(name)}  ${desc}${agent}`);
     }
     return lines.join('\n');
@@ -563,6 +604,62 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
       if (parts.length) lines.push(`  ${parts.join(' · ')}`);
     }
     return lines.join('\n') || `No plan status`;
+  },
+
+  brain_workflow_compile(data: any, o): string {
+    const phases = data.phases ?? [];
+    const header = `${bold('Workflow compiled')} — ${dim(data.kind ?? 'workflow')} · ${phases.length} phase${phases.length === 1 ? '' : 's'}`;
+    if (o.compact) {
+      return header;
+    }
+    const lines = [header];
+    if (data.summary) lines.push(`  ${dim(data.summary)}`);
+    if (data.domains?.length) lines.push(`  ${bold('Domains')}: ${data.domains.join(', ')}`);
+    if (phases.length) {
+      lines.push('');
+      for (const phase of phases.slice(0, o.maxItems)) {
+        const agents = (phase.agents ?? []).map((agent: any) => agent.name).join(', ') || 'none';
+        lines.push(`  ${color(phase.name ?? '?', C.cyan)} ${dim(phase.parallel ? '[parallel]' : '[sequential]')}  ${agents}`);
+      }
+    }
+    return lines.join('\n');
+  },
+
+  brain_workflow_apply(data: any, o): string {
+    if (!(data.ok || data.plan_id)) {
+      return color('Workflow apply failed: ' + (data.error ?? JSON.stringify(data)), C.red);
+    }
+    const lines = [
+      `${bold('Workflow applied')} ${color('✓', C.green)}`,
+      data.plan_id ? `  ${bold('Plan')}: ${color(String(data.plan_id).slice(0, 8), C.cyan)}` : '',
+      data.workflow_kind ? `  ${bold('Kind')}: ${dim(data.workflow_kind)}` : '',
+      data.summary ? `  ${bold('Summary')}: ${dim(data.summary)}` : '',
+      data.config_path ? `  ${bold('Config')}: ${data.config_path}` : '',
+    ].filter(Boolean) as string[];
+    const ready = data.ready_tasks ?? [];
+    if (ready.length && !o.compact) {
+      lines.push('');
+      lines.push(`${bold('Ready now')}:`);
+      for (const task of ready.slice(0, o.maxItems)) {
+        lines.push(`  ${statusIcon('ready')} ${color(task.name ?? '?', C.green)} ${dim(task.agent_name ? `(${task.agent_name})` : '')}`);
+      }
+    }
+    return lines.join('\n');
+  },
+
+  brain_workflow_run(data: any, o): string {
+    if (!(data.ok || data.plan_id)) {
+      return color('Workflow run failed: ' + (data.error ?? JSON.stringify(data)), C.red);
+    }
+    const lines = [
+      `${bold('Workflow running')} ${color('●', C.yellow)}`,
+      data.plan_id ? `  ${bold('Plan')}: ${color(String(data.plan_id).slice(0, 8), C.cyan)}` : '',
+      data.pid ? `  ${bold('PID')}: ${data.pid}` : '',
+      data.mode ? `  ${bold('Mode')}: ${dim(data.mode)}` : '',
+      data.isolation ? `  ${bold('Isolation')}: ${dim(data.isolation)}` : '',
+      data.log_path ? `  ${bold('Log')}: ${data.log_path}` : '',
+    ].filter(Boolean) as string[];
+    return lines.join('\n');
   },
 
   // ── Memory ─────────────────────────────────────────────────────────────────

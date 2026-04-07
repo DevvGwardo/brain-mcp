@@ -206,6 +206,7 @@ export interface Checkpoint {
   session_id: string;
   agent_name: string;
   state: string; // JSON
+  ledger_entry_id: number | null;
   created_at: string;
 }
 
@@ -361,6 +362,7 @@ export class BrainDB {
         session_id TEXT NOT NULL,
         agent_name TEXT NOT NULL,
         state TEXT NOT NULL,
+        ledger_entry_id INTEGER,
         created_at TEXT DEFAULT (datetime('now'))
       );
 
@@ -422,6 +424,7 @@ export class BrainDB {
 
     // Add priority column to task_graph
     try { this.db.exec("ALTER TABLE task_graph ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"); } catch { /* already exists */ }
+    try { this.db.exec("ALTER TABLE checkpoints ADD COLUMN ledger_entry_id INTEGER"); } catch { /* already exists */ }
 
     // Register cosine_similarity function for vector search
     this.db.function('cosine_similarity', { deterministic: true }, (a: unknown, b: unknown) => {
@@ -1371,7 +1374,9 @@ export class BrainDB {
       entry_type?: ContextEntryType;
       file_path?: string;
       since_id?: number;
+      since_created_at?: string;
       limit?: number;
+      order?: 'asc' | 'desc';
     }
   ): ContextEntry[] {
     let sql = 'SELECT * FROM context_ledger WHERE room = ?';
@@ -1381,8 +1386,9 @@ export class BrainDB {
     if (options?.entry_type) { sql += ' AND entry_type = ?'; params.push(options.entry_type); }
     if (options?.file_path) { sql += ' AND file_path = ?'; params.push(options.file_path); }
     if (options?.since_id) { sql += ' AND id > ?'; params.push(options.since_id); }
+    if (options?.since_created_at) { sql += ' AND datetime(created_at) > datetime(?)'; params.push(options.since_created_at); }
 
-    sql += ' ORDER BY id DESC LIMIT ?';
+    sql += ` ORDER BY id ${options?.order === 'asc' ? 'ASC' : 'DESC'} LIMIT ?`;
     params.push(options?.limit || 50);
 
     return this.db.prepare(sql).all(...params) as ContextEntry[];
@@ -1432,12 +1438,13 @@ export class BrainDB {
       progress_summary: string;
       blockers: string[];
       next_steps: string[];
-    }
+    },
+    ledgerEntryId?: number,
   ): string {
     const id = randomUUID();
     this.db.prepare(
-      `INSERT INTO checkpoints (id, room, session_id, agent_name, state) VALUES (?, ?, ?, ?, ?)`
-    ).run(id, room, sessionId, agentName, JSON.stringify(state));
+      `INSERT INTO checkpoints (id, room, session_id, agent_name, state, ledger_entry_id) VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(id, room, sessionId, agentName, JSON.stringify(state), ledgerEntryId ?? null);
     return id;
   }
 

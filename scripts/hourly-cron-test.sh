@@ -25,6 +25,10 @@ log ""
 
 cd "$ROOT_DIR"
 
+# Ensure native modules match the current Node.js version
+log "Rebuilding native modules for Node.js $(node --version)..."
+npm rebuild better-sqlite3 >> "$REPORT_FILE" 2>&1 || true
+
 # Ensure built
 if [ ! -d "dist" ]; then
     log "Building brain-mcp..."

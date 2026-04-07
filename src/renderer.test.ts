@@ -220,6 +220,51 @@ test('brain_plan_next shows ready tasks', () => {
   assert(result.includes('define-types'), 'shows task name');
 });
 
+test('brain_workflow_compile shows workflow phases', () => {
+  const result = renderTool('brain_workflow_compile', JSON.stringify({
+    kind: 'feature',
+    summary: 'feature workflow with 3 phases and 3 agent tasks.',
+    domains: ['orchestration', 'python'],
+    phases: [
+      { name: 'design', parallel: false, agents: [{ name: 'planner' }] },
+      { name: 'build', parallel: true, agents: [{ name: 'workflow-compiler' }, { name: 'python-conductor' }] },
+      { name: 'quality', parallel: false, agents: [{ name: 'quality' }] },
+    ],
+  }));
+  assert(result.includes('Workflow compiled'), 'shows workflow compiled header');
+  assert(result.includes('design'), 'shows design phase');
+  assert(result.includes('python'), 'shows domains');
+});
+
+test('brain_workflow_apply shows plan and ready tasks', () => {
+  const result = renderTool('brain_workflow_apply', JSON.stringify({
+    ok: true,
+    plan_id: 'workflow-plan-123',
+    workflow_kind: 'feature',
+    summary: 'feature workflow with 3 phases and 3 agent tasks.',
+    ready_tasks: [
+      { id: 'task-1', name: 'design:planner', agent_name: 'planner' },
+    ],
+  }));
+  assert(result.includes('Workflow applied'), 'shows workflow applied header');
+  assert(result.includes('workflow'), 'shows plan id fragment');
+  assert(result.includes('design:planner'), 'shows ready task');
+});
+
+test('brain_workflow_run shows conductor launch details', () => {
+  const result = renderTool('brain_workflow_run', JSON.stringify({
+    ok: true,
+    plan_id: 'workflow-plan-123',
+    pid: 4242,
+    mode: 'pi-core',
+    isolation: 'snapshot',
+    log_path: '/tmp/brain-workflow.log',
+  }));
+  assert(result.includes('Workflow running'), 'shows workflow running header');
+  assert(result.includes('4242'), 'shows pid');
+  assert(result.includes('snapshot'), 'shows isolation mode');
+});
+
 test('brain_contract_check passed', () => {
   const result = renderTool('brain_contract_check', JSON.stringify({
     passed: true, check_count: 5,

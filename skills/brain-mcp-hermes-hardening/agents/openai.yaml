@@ -1,0 +1,4 @@
+interface:
+  display_name: "Brain MCP Hermes Hardening"
+  short_description: "Hermes-led audit and hardening for brain-mcp"
+  default_prompt: "Use $brain-mcp-hermes-hardening to audit brain-mcp with Hermes, fix the highest-value weak spot, and prepare a safe commit."

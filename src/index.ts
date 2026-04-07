@@ -16,6 +16,7 @@ import { TaskRouter } from './router.js';
 import { registerAutopilot, minimalAgentPrompt } from './autopilot.js';
 import { compileWorkflow } from './workflow.js';
 import { spawnWithRecovery, cleanupSpawnTempFiles } from './spawn-recovery.js';
+import { renderTool } from './renderer.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
 // Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
@@ -113,7 +114,15 @@ setInterval(() => {
 let compactMode = process.env.BRAIN_COMPACT === '1' || process.env.BRAIN_COMPACT === 'true';
 
 /** Format a tool response. In compact mode, uses terse version if provided. */
-function reply(data: any, compactData?: any): { content: [{ type: 'text'; text: string }] } {
+function reply(data: any, compactData?: any, rendererName?: string): { content: [{ type: 'text'; text: string }] } {
+  if (!compactMode && rendererName) {
+    return {
+      content: [{
+        type: 'text' as const,
+        text: renderTool(rendererName, JSON.stringify(data), { color: true }),
+      }],
+    };
+  }
   const payload = compactMode && compactData !== undefined ? compactData : data;
   const text = compactMode ? JSON.stringify(payload) : JSON.stringify(payload, null, 2);
   return { content: [{ type: 'text' as const, text }] };
@@ -382,6 +391,21 @@ Spawned agents should use brain(action=...) instead of individual tools. It hand
   }
 );
 
+// Expose both legacy short tool names (`register`) and the documented
+// `brain_*` names (`brain_register`) so prompts, tests, and clients stay aligned.
+const rawTool = server.tool.bind(server);
+const _registeredTools = new Set<string>();
+(server as any).tool = ((name: string, ...args: any[]) => {
+  // Prevent duplicate registration: skip auto-prefix if brain_X already exists
+  const brainName = name.startsWith('brain_') ? name : `brain_${name}`;
+  if (!name.startsWith('brain_') && !_registeredTools.has(brainName)) {
+    (rawTool as any)(brainName, ...args);
+  }
+  _registeredTools.add(name);
+  if (!name.startsWith('brain_')) _registeredTools.add(brainName);
+  (rawTool as any)(name, ...args);
+}) as typeof server.tool;
+
 // ═══════════════════════════════════════
 //  Autopilot Meta-Tool (simplified interface for LLMs)
 // ═══════════════════════════════════════
@@ -593,10 +617,14 @@ server.tool(
       agents: filtered,
     };
     // Compact: just name+status, drop all the detail
-    return reply(agentSummary, {
-      ...agentSummary,
-      agents: filtered.map(a => ({ n: a.name, s: a.status, p: a.progress })),
-    });
+    return reply(
+      agentSummary,
+      {
+        ...agentSummary,
+        agents: filtered.map(a => ({ n: a.name, s: a.status, p: a.progress })),
+      },
+      'brain_agents',
+    );
   }
 );
 

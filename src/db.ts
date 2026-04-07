@@ -284,6 +284,8 @@ export class BrainDB {
     // shared memory for WAL reduces lock contention between connections.
     this.db.pragma('read_uncommitted = 1');
 
+    this.migrate();
+
     // ── Pre-warm critical hot-path statements ──────────────────────────────────
     // heartbeat / pulse — called every ~30s per agent session
     this._cacheStmt("UPDATE sessions SET last_heartbeat = datetime('now') WHERE id = ?");
@@ -300,8 +302,6 @@ export class BrainDB {
     // sessions health (most expensive — pre-warm the complex view)
     this._cacheStmt(`SELECT *, CAST((julianday('now') - julianday(last_heartbeat)) * 86400 AS INTEGER) AS heartbeat_age_seconds FROM sessions ORDER BY created_at`);
     this._cacheStmt('SELECT resource, owner_id FROM claims');
-
-    this.migrate();
   }
 
   private migrate(): void {

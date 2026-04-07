@@ -104,9 +104,7 @@ export function registerAutopilot(
     return undefined;
   }
 
-  server.tool(
-    'brain',
-    `Multi-agent coordination — one tool for everything.
+  const toolDescription = `Multi-agent coordination — one tool for everything.
 
 Actions:
   post     — Post a message to the team (content, channel?)
@@ -123,22 +121,27 @@ Actions:
   failed   — Mark task failed (reason)
   help     — Show this help
 
-Heartbeats, file locking, checkpoints are ALL AUTOMATIC. Just do your work.`,
-    {
-      action: z.enum(ACTIONS).describe('What to do'),
-      content: z.string().optional().describe('Message content (for post, dm, remember)'),
-      key: z.string().optional().describe('Key name (for set, get, remember)'),
-      value: z.string().optional().describe('Value (for set)'),
-      query: z.string().optional().describe('Search query (for recall, read)'),
-      channel: z.string().optional().describe('Channel name (for post, read)'),
-      to: z.string().optional().describe('Target agent name (for dm)'),
-      file: z.string().optional().describe('File path (for edit, done_file)'),
-      category: z.string().optional().describe('Category (for remember, recall)'),
-      summary: z.string().optional().describe('Summary (for done)'),
-      reason: z.string().optional().describe('Reason (for failed)'),
-      limit: cNum().optional().describe('Max results (for read, recall)'),
-    },
-    async ({ action, content, key, value, query, channel, to, file, category, summary, reason, limit }) => {
+For Hermes/MiniMax or any weaker tool caller: prefer this single tool instead of many low-level calls.
+Make exactly one tool call per assistant message. Wait for the result, then decide the next call.
+
+Heartbeats, file locking, checkpoints are ALL AUTOMATIC. Just do your work.`;
+
+  const toolSchema = {
+    action: z.enum(ACTIONS).describe('What to do'),
+    content: z.string().optional().describe('Message content (for post, dm, remember)'),
+    key: z.string().optional().describe('Key name (for set, get, remember)'),
+    value: z.string().optional().describe('Value (for set)'),
+    query: z.string().optional().describe('Search query (for recall, read)'),
+    channel: z.string().optional().describe('Channel name (for post, read)'),
+    to: z.string().optional().describe('Target agent name (for dm)'),
+    file: z.string().optional().describe('File path (for edit, done_file)'),
+    category: z.string().optional().describe('Category (for remember, recall)'),
+    summary: z.string().optional().describe('Summary (for done)'),
+    reason: z.string().optional().describe('Reason (for failed)'),
+    limit: cNum().optional().describe('Max results (for read, recall)'),
+  };
+
+  const toolHandler = async ({ action, content, key, value, query, channel, to, file, category, summary, reason, limit }: any) => {
       ensureState();
       autoPulse(`brain:${action}`);
       const dms = consumeDMs();
@@ -207,9 +210,11 @@ Heartbeats, file locking, checkpoints are ALL AUTOMATIC. Just do your work.`,
           const agents = db.getAgentHealth(room);
           const claims = db.getClaims(room);
           const recent = db.getMessages('general', room, undefined, 5);
+          const keys = db.getKeys(room).slice(0, 20);
           result = {
             agents: agents.map(a => ({ name: a.name, status: a.status, progress: a.progress, stale: a.is_stale })),
             claims: claims.map(c => ({ file: c.resource, owner: c.owner_name })),
+            state_keys: keys,
             recent_messages: recent.map(m => ({ from: m.sender_name, content: m.content.slice(0, 100) })),
           };
           break;
@@ -274,7 +279,7 @@ Heartbeats, file locking, checkpoints are ALL AUTOMATIC. Just do your work.`,
         case 'help': {
           result = {
             actions: ACTIONS.map(a => a),
-            tip: 'Heartbeats, file locking, and checkpoints are automatic. Just focus on your task.',
+            tip: 'Prefer one brain/control tool call at a time. For a quick overview, use action="status".',
           };
           break;
         }
@@ -286,7 +291,22 @@ Heartbeats, file locking, checkpoints are ALL AUTOMATIC. Just do your work.`,
       // Append any pending DMs to the response
       const text = JSON.stringify(result, null, 2) + (dms || '');
       return { content: [{ type: 'text' as const, text }] };
-    }
+    };
+
+  server.tool(
+    'brain',
+    toolDescription,
+    toolSchema,
+    toolHandler,
+  );
+
+  server.tool(
+    'control',
+    `${toolDescription}
+
+Alias of the "brain" meta-tool with a less ambiguous name for Hermes/MiniMax clients.`,
+    toolSchema,
+    toolHandler,
   );
 }
 

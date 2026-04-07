@@ -190,7 +190,7 @@ def run_gate_and_notify(
             msg = (
                 f"INTEGRATION GATE FAILED — you have {len(routed.errors)} error(s) to fix:\n"
                 f"{error_list}\n\n"
-                "Fix these, then call brain:brain_contract_check and brain:brain_pulse status=done."
+                "Fix these, then use the brain MCP contract_check tool and pulse status=done."
             )
             db.send_dm(conductor_id, conductor_name, routed.agent_id, msg)
             db.pulse(routed.agent_id, "working", f"gate failed: {len(routed.errors)} errors")

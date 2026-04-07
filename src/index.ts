@@ -336,47 +336,47 @@ WHEN TO USE THESE TOOLS:
 - When you want agents that remember what they learned across sessions
 
 HOW TO ORCHESTRATE:
-1. brain_register — name yourself (e.g. "lead", "architect")
-2. brain_recall — check if previous sessions stored useful knowledge about this codebase
-3. Analyze the task. For complex work, use brain_plan to create a dependency-aware task DAG
-4. brain_set — store shared context so spawned agents can read it
-5. brain_wake — spawn each agent. Supports:
+1. register — name yourself (e.g. "lead", "architect")
+2. recall — check if previous sessions stored useful knowledge about this codebase
+3. Analyze the task. For complex work, use plan to create a dependency-aware task DAG
+4. set — store shared context so spawned agents can read it
+5. wake — spawn each agent. Supports:
    - tmux split panes (default) — visible, interactive
    - headless mode (layout="headless") — no tmux needed, works everywhere
    - multi-LLM routing (model="haiku" for cheap tasks, model="opus" for complex ones)
    - custom CLIs (cli="codex", cli="aider" — for non-Claude agents)
    - configurable timeouts (timeout=3600)
-6. brain_agents — monitor health of all spawned agents
-7. brain_auto_gate — run continuous integration gate until all errors are fixed
-8. brain_respawn — if an agent fails, respawn with recovery context
-9. brain_remember — store discoveries for future sessions
+6. agents — monitor health of all spawned agents
+7. auto_gate — run continuous integration gate until all errors are fixed
+8. respawn — if an agent fails, respawn with recovery context
+9. remember — store discoveries for future sessions
 10. brain_metrics — track agent performance over time
 
 TASK DAG (for complex work):
-- brain_plan — create tasks with dependencies: types → implementation → tests
-- brain_plan_next — get tasks whose dependencies are all satisfied
-- brain_plan_update — mark tasks done/failed (auto-promotes dependents to ready)
-- brain_plan_status — view overall progress
+- plan — create tasks with dependencies: types → implementation → tests
+- plan_next — get tasks whose dependencies are all satisfied
+- plan_update — mark tasks done/failed (auto-promotes dependents to ready)
+- plan_status — view overall progress
 
 PERSISTENT MEMORY (knowledge that survives across sessions):
-- brain_remember — store knowledge (architecture insights, gotchas, patterns)
-- brain_recall — search for knowledge from previous agents/sessions
-- brain_forget — remove outdated knowledge
+- remember — store knowledge (architecture insights, gotchas, patterns)
+- recall — search for knowledge from previous agents/sessions
+- forget — remove outdated knowledge
 - This is the key differentiator — native agents are amnesiac, brain agents learn
 
 HEARTBEAT PROTOCOL:
-- Spawned agents call brain_pulse every 2-3 tool calls to report status
-- The lead calls brain_agents to see all agent health at a glance
-- brain_pulse also returns pending DMs, keeping agents in sync
+- Spawned agents call pulse every 2-3 tool calls to report status
+- The lead calls agents to see all agent health at a glance
+- pulse also returns pending DMs, keeping agents in sync
 
 CONTRACT PROTOCOL (prevents integration bugs):
-- brain_contract_set — publish what your module provides/expects
-- brain_contract_get — read other agents' contracts before writing code
-- brain_contract_check — validate all contracts
-- brain_auto_gate — run gate in a loop, DM agents their errors, wait for fixes
+- contract_set — publish what your module provides/expects
+- contract_get — read other agents' contracts before writing code
+- contract_check — validate all contracts
+- auto_gate — run gate in a loop, DM agents their errors, wait for fixes
 
 AUTO-RECOVERY:
-- brain_respawn — detect failed agent, build recovery context, spawn replacement
+- respawn — detect failed agent, build recovery context, spawn replacement
 - The replacement knows what the previous agent was doing and picks up where it left off
 
 PERFORMANCE TRACKING:
@@ -384,7 +384,12 @@ PERFORMANCE TRACKING:
 - brain_metric_record — record outcome after a task completes
 - Use this data to optimize: which models for which tasks, which patterns work
 
-IMPORTANT: Do NOT fall back to the built-in Agent tool when the user asks for parallel agents or brain_wake. Use these brain tools instead — they spawn visible, independent sessions that the user can watch.
+HERMES/MINIMAX TOOL-NAMING RULE:
+- Prefer the short tool names above: register, status, sessions, get, set, keys, pulse, agents, plan, wake, claim, release.
+- Do NOT prepend "brain_" yourself when calling tools through Hermes. Hermes/MCP adds server namespacing automatically.
+- If the client shows names like mcp_brain_status or mcp_brain_get, use those exact names from the picker instead of inventing brain_brain_* forms.
+
+IMPORTANT: Do NOT fall back to the built-in Agent tool when the user asks for parallel agents or wake/swarm. Use these brain tools instead — they spawn visible, independent sessions that the user can watch.
 
 SIMPLIFIED INTERFACE: The "brain" meta-tool wraps all coordination into one tool call with an action parameter.
 Spawned agents should use brain(action=...) instead of individual tools. It handles heartbeats, file locking, and checkpoints automatically.`,

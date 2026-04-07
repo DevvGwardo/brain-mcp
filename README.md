@@ -161,6 +161,59 @@ graph TB
     style GATE fill:#EF4444,stroke:#DC2626,color:#fff
 ```
 
+### Architecture
+
+This diagram shows the internal architecture of brain-mcp and how its components interact:
+
+```mermaid
+graph TB
+    subgraph "External Clients"
+        HERMES["Hermes CLI"]
+        CLAUDE["Claude Code"]
+        ANY["Any MCP Client"]
+    end
+
+    subgraph "brain-mcp (Node.js)"
+        SERVER["src/index.ts<br/>MCP Request Router"]
+        CONDUCTOR["brain-conductor<br/>Zero-token Orchestration CLI"]
+        GATE["src/gate.ts<br/>Integration Gate"]
+    end
+
+    subgraph "pi-agent-core Runtime"
+        PI_CORE["src/pi-core-agent.ts<br/>In-process Agent Runner"]
+        PI_CORE_TOOLS["src/pi-core-tools.ts<br/>14 Brain Tools as AgentTools"]
+        PI_AGENT["pi-agent-core Agent<br/>model + tools + events"]
+    end
+
+    subgraph "BrainDB (SQLite)"
+        DB[("brain.db<br/>sessions, state, messages,<br/>claims, contracts, memory")]
+    end
+
+    HERMES & CLAUDE & ANY --> SERVER
+    SERVER <--> DB
+    SERVER --> CONDUCTOR
+    CONDUCTOR --> PI_CORE
+    PI_CORE --> PI_CORE_TOOLS
+    PI_CORE --> PI_AGENT
+    PI_CORE_TOOLS --> DB
+    PI_AGENT -->|beforeToolCall<br/>pulse| DB
+    CONDUCTOR --> GATE
+    GATE -->|DM errors| CONDUCTOR
+
+    style HERMES fill:#FF6B6B,stroke:#DC2626,color:#fff
+    style CLAUDE fill:#3B82F6,stroke:#2563EB,color:#fff
+    style ANY fill:#7C3AED,stroke:#6D28D9,color:#fff
+    style SERVER fill:#1E293B,stroke:#334155,color:#fff
+    style CONDUCTOR fill:#9333EA,stroke:#7C3AED,color:#fff
+    style GATE fill:#EF4444,stroke:#DC2626,color:#fff
+    style PI_CORE fill:#10B981,stroke:#059669,color:#fff
+    style PI_CORE_TOOLS fill:#059669,stroke:#047857,color:#fff
+    style PI_AGENT fill:#06B6D4,stroke:#0891B2,color:#fff
+    style DB fill:#1E293B,stroke:#334155,color:#fff
+```
+
+**pi-agent-core** is the LLM agent runtime — handles the model interaction loop, tool execution, and event subscription. **brain-mcp** provides the coordination layer (state, messaging, heartbeats, locks, contracts) as tools that pi agents call. The **conductor** ties it all together with phases, gates, and tmux layout.
+
 **Zero-token coordination.** The conductor is pure Python — LLM tokens are only spent on the actual work. Heartbeats, claims, contracts, gates, retries all run locally.
 
 **No server to manage.** Each agent opens its own stdio connection to the brain. SQLite WAL mode handles concurrent access safely.

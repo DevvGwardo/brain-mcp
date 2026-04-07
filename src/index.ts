@@ -396,18 +396,29 @@ Spawned agents should use control(action=...) instead of individual tools. It ha
   }
 );
 
-// Expose both legacy short tool names (`register`) and the documented
-// `brain_*` names (`brain_register`) so prompts, tests, and clients stay aligned.
+// Register short MCP tool names by default.
+// Legacy `brain_*` aliases can be re-enabled with BRAIN_LEGACY_ALIASES=1 for
+// older clients, but they are off by default because Hermes/MiniMax tends to
+// overfit them into doubly-prefixed forms like `brain_brain_wake`.
 const rawTool = server.tool.bind(server);
+const exposeLegacyAliases =
+  process.env.BRAIN_LEGACY_ALIASES === '1' ||
+  process.env.BRAIN_LEGACY_ALIASES === 'true';
 const _registeredTools = new Set<string>();
 (server as any).tool = ((name: string, ...args: any[]) => {
-  // Prevent duplicate registration: skip auto-prefix if brain_X already exists
   const brainName = name.startsWith('brain_') ? name : `brain_${name}`;
-  if (!name.startsWith('brain_') && !_registeredTools.has(brainName)) {
+  if (
+    exposeLegacyAliases &&
+    !name.startsWith('brain_') &&
+    name !== 'control' &&
+    !_registeredTools.has(brainName)
+  ) {
     (rawTool as any)(brainName, ...args);
   }
   _registeredTools.add(name);
-  if (!name.startsWith('brain_')) _registeredTools.add(brainName);
+  if (exposeLegacyAliases && !name.startsWith('brain_') && name !== 'control') {
+    _registeredTools.add(brainName);
+  }
   (rawTool as any)(name, ...args);
 }) as typeof server.tool;
 

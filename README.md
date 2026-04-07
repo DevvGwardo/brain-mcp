@@ -100,7 +100,7 @@ hermes-brain --config pipeline.json
 **Or from inside Hermes (interactive):**
 
 ```
-hermes> Use brain:brain_register, then brain:brain_wake to spawn 3 agents
+hermes> Use register, then wake to spawn 3 agents
         that each refactor a different module.
 ```
 
@@ -670,13 +670,16 @@ erDiagram
 If you don't want the Python CLI, you can orchestrate directly from inside a Hermes session:
 
 ```
-hermes> brain:brain_register with name "lead"
-hermes> brain:brain_set key="task" value="refactor auth" scope="room"
-hermes> brain:brain_wake name="worker-1" task="..." cli="hermes" layout="headless"
-hermes> brain:brain_wake name="worker-2" task="..." cli="hermes" layout="headless"
-hermes> brain:brain_agents        # monitor health
-hermes> brain:brain_auto_gate     # run gate loop until clean
+hermes> register with name "lead"
+hermes> set key="task" value="refactor auth" scope="room"
+hermes> wake name="worker-1" task="..." cli="hermes" layout="headless"
+hermes> wake name="worker-2" task="..." cli="hermes" layout="headless"
+hermes> agents                    # monitor health
+hermes> auto_gate                 # run gate loop until clean
 ```
+
+If Hermes shows namespaced picker entries such as `mcp_brain_wake`, use the
+exact picker name. Do not prepend `brain_` yourself.
 
 The tools work identically in interactive mode, headless mode, and across mixed fleets.
 

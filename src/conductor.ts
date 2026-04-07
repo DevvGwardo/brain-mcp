@@ -276,7 +276,7 @@ function spawnAgent(
       fileScope,
       acceptance,
       '',
-      `WHEN DONE: post a summary with brain_post, then stop.`,
+      `WHEN DONE: post a summary with post, then stop.`,
     ].join('\n');
 
     // Write the task + brain instructions to a temp file for --append-system-prompt
@@ -424,7 +424,7 @@ rm -f "${watcherFile}"
 
     const prompt = [
       'You have brain MCP tools available (register, pulse, post, read, dm, inbox, set, get, claim, release, claims, contract_set, contract_get, contract_check).',
-      'If Hermes shows MCP-prefixed names like mcp_brain_register, use those exact names from the picker. Do not invent brain_brain_* tool names.',
+      'Use the short names above. If Hermes shows namespaced picker entries like mcp_brain_register, copy the picker exactly. Do not invent brain_brain_* tool names.',
       '',
       `IMPORTANT: Use claim before editing any file, and release when done.`,
       '',
@@ -452,10 +452,10 @@ rm -f "${watcherFile}"
       agentTask,
       '',
       `WHEN DONE:`,
-      `1. Call brain_contract_check — fix any mismatches before proceeding`,
-      `2. Call brain_pulse with status="done" and a summary`,
-      `3. Call brain_post to announce what you accomplished`,
-      `4. Release all claimed files with brain_release`,
+      `1. Call contract_check — fix any mismatches before proceeding`,
+      `2. Call pulse with status="done" and a summary`,
+      `3. Call post to announce what you accomplished`,
+      `4. Release all claimed files with release`,
       `5. Type /exit to close this session`,
     ].join('\n');
 

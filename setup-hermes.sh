@@ -54,7 +54,7 @@ if ! command -v hermes &>/dev/null; then
   echo "    Install hermes: curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash"
   echo "    Then run: hermes mcp add brain -- node $BRAIN_INDEX"
 else
-  # Register with BRAIN_DEFAULT_CLI=hermes so brain_wake auto-spawns hermes agents
+  # Register with BRAIN_DEFAULT_CLI=hermes so wake auto-spawns hermes agents
   hermes mcp remove brain 2>/dev/null
   hermes mcp add brain --env BRAIN_DEFAULT_CLI=hermes -- node "$BRAIN_INDEX" 2>/dev/null \
     && echo "  ✓ Registered brain MCP server (with BRAIN_DEFAULT_CLI=hermes)" \
@@ -89,12 +89,12 @@ echo "     hermes-brain \"Refactor auth\" --agents backend frontend --model clau
 echo "     hermes-brain --config pipeline.json"
 echo ""
 echo "  2. From Claude Code (mixed fleet):"
-echo "     brain_wake({ task: '...', cli: 'hermes', layout: 'headless' })"
+echo "     wake({ task: '...', cli: 'hermes', layout: 'headless' })"
 echo ""
 echo "  3. From hermes interactive:"
-echo "     hermes -q 'Use brain:brain_register, then brain:brain_wake to spawn 3 agents'"
+echo "     hermes -q 'Use register, then wake to spawn 3 agents'"
 echo ""
-echo "  Brain tools in hermes: brain:brain_register, brain:brain_claim, brain:brain_post, etc."
-echo "  Brain tools in Claude: brain_register, brain_claim, brain_post, etc."
+echo "  Brain tools in hermes usually appear as mcp_brain_register, mcp_brain_claim, mcp_brain_post, etc."
+echo "  In Claude and other MCP clients, prefer the short names: register, claim, post, wake, agents."
 echo "  Both share the same SQLite database — agents can cross-coordinate."
 echo ""

@@ -34,6 +34,7 @@ class Session:
     created_at: str
     last_heartbeat: str
     last_seen_dm_id: int = 0
+    exit_code: Optional[int] = None
 
 
 @dataclass
@@ -317,6 +318,15 @@ class BrainDB:
         self.conn.commit()
         return r.rowcount
 
+    _SESSION_COLS = "id, name, pid, cwd, room, metadata, status, progress, created_at, last_heartbeat, last_seen_dm_id, exit_code"
+
+    def _row_to_session(self, r) -> Session:
+        """Convert a row to Session, tolerant of extra columns."""
+        d = dict(r)
+        # Only pass fields Session knows about
+        known = {f.name for f in Session.__dataclass_fields__.values()}
+        return Session(**{k: v for k, v in d.items() if k in known})
+
     def get_sessions(self, room: Optional[str] = None) -> list[Session]:
         self.prune_stale_sessions()
         if room:
@@ -328,11 +338,11 @@ class BrainDB:
             rows = self.conn.execute(
                 "SELECT * FROM sessions WHERE last_heartbeat > datetime('now', '-5 minutes') ORDER BY created_at"
             ).fetchall()
-        return [Session(**dict(r)) for r in rows]
+        return [self._row_to_session(r) for r in rows]
 
     def get_session(self, sid: str) -> Optional[Session]:
         r = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
-        return Session(**dict(r)) if r else None
+        return self._row_to_session(r) if r else None
 
     def get_agent_health(self, room: Optional[str] = None) -> list[AgentHealth]:
         self.prune_stale_sessions()

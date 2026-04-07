@@ -368,6 +368,14 @@ export class BrainDB {
         PRIMARY KEY (key, scope)
       );
 
+      CREATE TABLE IF NOT EXISTS barrier_members (
+        barrier_key TEXT NOT NULL,
+        barrier_scope TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        checked_in_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (barrier_key, barrier_scope, session_id)
+      );
+
       CREATE TABLE IF NOT EXISTS task_results (
         task_id TEXT PRIMARY KEY,
         plan_id TEXT NOT NULL,
@@ -394,19 +402,21 @@ export class BrainDB {
   // ── Atomic Counters ──
 
   incr(key: string, scope: string, delta: number = 1): { old_value: number; new_value: number } {
-    const row = this.db.prepare('SELECT value FROM state WHERE key = ? AND scope = ?').get(key, scope) as { value: string } | undefined;
-    const oldValue = row ? parseInt(row.value, 10) || 0 : 0;
-    const newValue = oldValue + delta;
-    this.db.prepare(
-      `INSERT INTO state (key, scope, value, updated_by, updated_by_name, updated_at)
-       VALUES (?, ?, ?, 'system', 'atomic-ops', datetime('now'))
-       ON CONFLICT(key, scope) DO UPDATE SET
-         value = CAST(value AS INTEGER) + ?,
-         updated_by = excluded.updated_by,
-         updated_by_name = excluded.updated_by_name,
-         updated_at = datetime('now')`
-    ).run(key, scope, String(newValue), delta);
-    return { old_value: oldValue, new_value: newValue };
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO state (key, scope, value, updated_by, updated_by_name, updated_at)
+         VALUES (?, ?, ?, 'system', 'atomic-ops', datetime('now'))
+         ON CONFLICT(key, scope) DO UPDATE SET
+           value = CAST(value AS INTEGER) + ?,
+           updated_by = excluded.updated_by,
+           updated_by_name = excluded.updated_by_name,
+           updated_at = datetime('now')`
+      ).run(key, scope, String(delta), delta);
+      const row = this.db.prepare('SELECT value FROM state WHERE key = ? AND scope = ?').get(key, scope) as { value: string };
+      const newValue = parseInt(row.value, 10) || 0;
+      return { old_value: newValue - delta, new_value: newValue };
+    });
+    return tx();
   }
 
   decr(key: string, scope: string, delta: number = 1): { old_value: number; new_value: number } {
@@ -420,20 +430,56 @@ export class BrainDB {
 
   // ── Barriers ──
 
-  wait_on(key: string, scope: string, threshold: number, owner_id: string, owner_name: string): { reached: boolean; current: number; threshold: number } {
-    const existing = this.db.prepare('SELECT * FROM barriers WHERE key = ? AND scope = ?').get(key, scope) as any;
-    if (!existing) {
-      this.db.prepare('INSERT INTO barriers (key, scope, threshold, current, created_by) VALUES (?, ?, ?, 1, ?)').run(key, scope, threshold, owner_id);
-      return { reached: threshold <= 1, current: 1, threshold };
-    }
-    const newCurrent = existing.current + 1;
-    this.db.prepare('UPDATE barriers SET current = ? WHERE key = ? AND scope = ?').run(newCurrent, key, scope);
-    return { reached: newCurrent >= threshold, current: newCurrent, threshold };
+  wait_on(key: string, scope: string, threshold: number, owner_id: string, owner_name: string): { reached: boolean; current: number; threshold: number; already_checked_in: boolean } {
+    const tx = this.db.transaction(() => {
+      // Upsert barrier — first caller's threshold wins
+      this.db.prepare(
+        `INSERT INTO barriers (key, scope, threshold, current, created_by)
+         VALUES (?, ?, ?, 0, ?)
+         ON CONFLICT(key, scope) DO NOTHING`
+      ).run(key, scope, threshold, owner_id);
+
+      // Check if this session already checked in
+      const alreadyIn = this.db.prepare(
+        'SELECT 1 FROM barrier_members WHERE barrier_key = ? AND barrier_scope = ? AND session_id = ?'
+      ).get(key, scope, owner_id);
+
+      if (!alreadyIn) {
+        this.db.prepare(
+          'INSERT INTO barrier_members (barrier_key, barrier_scope, session_id) VALUES (?, ?, ?)'
+        ).run(key, scope, owner_id);
+        this.db.prepare(
+          'UPDATE barriers SET current = current + 1 WHERE key = ? AND scope = ?'
+        ).run(key, scope);
+      }
+
+      const barrier = this.db.prepare('SELECT * FROM barriers WHERE key = ? AND scope = ?').get(key, scope) as any;
+      return {
+        reached: barrier.current >= barrier.threshold,
+        current: barrier.current,
+        threshold: barrier.threshold,
+        already_checked_in: !!alreadyIn,
+      };
+    });
+    return tx();
   }
 
-  get_barrier(key: string, scope: string): { key: string; scope: string; threshold: number; current: number } | null {
+  get_barrier(key: string, scope: string): { key: string; scope: string; threshold: number; current: number; members: string[] } | null {
     const b = this.db.prepare('SELECT * FROM barriers WHERE key = ? AND scope = ?').get(key, scope) as any;
-    return b ? { key: b.key, scope: b.scope, threshold: b.threshold, current: b.current } : null;
+    if (!b) return null;
+    const members = this.db.prepare(
+      'SELECT session_id FROM barrier_members WHERE barrier_key = ? AND barrier_scope = ?'
+    ).all(key, scope) as { session_id: string }[];
+    return { key: b.key, scope: b.scope, threshold: b.threshold, current: b.current, members: members.map(m => m.session_id) };
+  }
+
+  barrier_reset(key: string, scope: string): { deleted: boolean } {
+    const tx = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM barrier_members WHERE barrier_key = ? AND barrier_scope = ?').run(key, scope);
+      const changes = this.db.prepare('DELETE FROM barriers WHERE key = ? AND scope = ?').run(key, scope).changes;
+      return { deleted: changes > 0 };
+    });
+    return tx();
   }
 
   // ── Task Results ──

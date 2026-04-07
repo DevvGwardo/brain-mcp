@@ -473,7 +473,7 @@ server.tool(
   'Atomically increment a numeric counter in shared state. Thread-safe — use for shared counters, progress tracking, or aggregation across agents.',
   {
     key: z.string().describe('Counter key name'),
-    delta: z.number().optional().describe('Amount to increment by (default: 1)'),
+    delta: cNum().optional().describe('Amount to increment by (default: 1)'),
     scope: z.string().optional().describe('Scope (default: current room)'),
   },
   async ({ key, delta, scope }) => {
@@ -527,6 +527,25 @@ server.tool(
       return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
     } catch (e: any) {
       return { content: [{ type: 'text' as const, text: JSON.stringify({ error: e.message }) }] };
+    }
+  }
+);
+
+server.tool(
+  'barrier_reset',
+  'Reset a barrier — deletes the barrier and all member check-ins so the same key can be reused for a fresh run.',
+  {
+    key: z.string().describe('Barrier identifier to reset'),
+    scope: z.string().optional().describe('Scope (default: current room)'),
+  },
+  async ({ key, scope }) => {
+    ensureSession();
+    const s = scope || room;
+    try {
+      const result = db.barrier_reset(key, s);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, key, scope: s, ...result }) }] };
+    } catch (e: any) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: e.message }) }] };
     }
   }
 );

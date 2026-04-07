@@ -193,7 +193,6 @@ src/
 ├── autopilot.ts                # registerAutopilot, minimalAgentPrompt
 ├── workflow.ts                 # compileWorkflow
 ├── conductor.js                # Node-based workflow conductor (runtime)
-├── bridge.js                   # MCP bridge (runtime)
 └── http.js                     # Optional HTTP server
 ```
 

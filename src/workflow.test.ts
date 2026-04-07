@@ -31,14 +31,14 @@ test('feature workflow compiles into design/build/quality phases', () => {
   assert(buildAgents.some((agent) => agent.files.includes('src/index.ts')), 'assigns index.ts file scope');
 });
 
-test('bugfix workflow biases toward bridge/runtime scope', () => {
-  const workflow = compileWorkflow('Fix the ugly Hermes output rendering issue in the bridge/renderer path', {
+test('bugfix workflow biases toward transport/runtime scope', () => {
+  const workflow = compileWorkflow('Fix the ugly Hermes output rendering issue in the renderer/transport path', {
     cwd: '/repo/brain-mcp',
   });
 
   assert(workflow.kind === 'bugfix', 'classifies bugfix work');
   const buildAgents = workflow.phases.find((phase) => phase.name === 'build')?.agents ?? [];
-  assert(buildAgents.some((agent) => agent.role === 'bridge-runtime'), 'includes bridge runtime role');
+  assert(buildAgents.some((agent) => agent.role === 'transport-runtime'), 'includes transport runtime role');
   assert(buildAgents.some((agent) => agent.files.includes('src/renderer.ts')), 'assigns renderer file scope');
 });
 

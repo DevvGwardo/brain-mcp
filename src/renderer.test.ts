@@ -56,7 +56,7 @@ test('brain_sessions shows all sessions', () => {
   }));
   assert(result.includes('agent-a'), 'includes agent-a');
   assert(result.includes('agent-b'), 'includes agent-b');
-  assert(result.includes('●'), 'has working indicator');
+  assert(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(result), 'has working spinner');
   assert(result.includes('✓'), 'has done indicator');
 });
 

@@ -87,6 +87,22 @@ function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
 }
 
+function padAnsi(text: string, width: number): string {
+  const visible = stripAnsi(text).length;
+  return visible >= width ? text : text + ' '.repeat(width - visible);
+}
+
+function renderBox(lines: string[], borderColor: string): string[] {
+  const width = Math.max(...lines.map(line => stripAnsi(line).length), 0);
+  const top = color(`┌${'─'.repeat(width + 2)}┐`, borderColor);
+  const bottom = color(`└${'─'.repeat(width + 2)}┘`, borderColor);
+  const body = lines.map((line) => {
+    const padded = padAnsi(line, width);
+    return `${color('│', borderColor)} ${padded} ${color('│', borderColor)}`;
+  });
+  return [top, ...body, bottom];
+}
+
 // ── Render options ────────────────────────────────────────────────────────────
 
 export interface RenderOptions {
@@ -121,12 +137,23 @@ const STATUS_COLOR: Record<string, string> = {
   blocked: C.magenta,
 };
 
-function statusIcon(s: string): string {
+const WORKING_SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+function workingSpinner(ageSeconds = 0): string {
+  const index = Math.abs(Math.floor(ageSeconds * 3)) % WORKING_SPINNER_FRAMES.length;
+  return WORKING_SPINNER_FRAMES[index];
+}
+
+function statusIcon(s: string, ageSeconds?: number): string {
   const icons: Record<string, string> = {
-    idle: '○', working: '●', done: '✓', failed: '✗',
+    idle: '○', working: workingSpinner(ageSeconds), done: '✓', failed: '✗',
     stale: '?', queued: '◌', ready: '▶', blocked: '▣',
   };
   return color(icons[s] ?? '?', STATUS_COLOR[s] ?? C.white);
+}
+
+function statusLabel(s: string): string {
+  return color(s.toUpperCase(), STATUS_COLOR[s] ?? C.white);
 }
 
 // ── Core render function ──────────────────────────────────────────────────────
@@ -201,7 +228,8 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
       const age = s.heartbeat_age_seconds ?? s.heartbeat_age ?? 0;
       const ageStr = age < 60 ? `${age}s ago` : `${Math.floor(age / 60)}m ago`;
       const status = s.status ?? 'idle';
-      lines.push(`  ${statusIcon(status)} ${name}  ${dim(`(${sid.slice(0, 8)}..., ${ageStr})`)}`);
+      const progress = s.progress ? ` ${dim(`- ${String(s.progress).slice(0, 60)}`)}` : '';
+      lines.push(`  ${statusIcon(status, age)} ${name} ${statusLabel(status)}  ${dim(`(${sid.slice(0, 8)}..., ${ageStr})`)}${progress}`);
     }
     if (sessions.length > shown.length) {
       lines.push(`  ${dim(`... and ${sessions.length - shown.length} more`)}`);
@@ -213,7 +241,7 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
     const lines = [`${bold('Session Status')}`];
     if (data.session_id) lines.push(`  ${bold('ID')}: ${color(data.session_id.slice(0, 12) + '...', C.cyan)}`);
     if (data.name) lines.push(`  ${bold('Name')}: ${agentText(data.name)}`);
-    if (data.status) lines.push(`  ${bold('Status')}: ${statusIcon(data.status)} ${data.status}`);
+    if (data.status) lines.push(`  ${bold('Status')}: ${statusIcon(data.status, data.heartbeat_age_seconds)} ${statusLabel(data.status)}`);
     if (data.room) lines.push(`  ${bold('Room')}: ${data.room}`);
     if (data.agent_count !== undefined) lines.push(`  ${bold('Agents')}: ${data.agent_count}`);
     if (data.message_count !== undefined) lines.push(`  ${bold('Messages')}: ${data.message_count}`);
@@ -253,15 +281,23 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
     for (const a of shown) {
       const name = agentText(a.name ?? '?');
       const status = a.status ?? 'idle';
-      const stale = a.is_stale ? ` ${color('STALE', C.red)}` : '';
       const age = a.heartbeat_age_seconds ?? 0;
       const ageStr = age < 60 ? `${age}s` : `${Math.floor(age / 60)}m`;
-      const claims = a.held_claims?.length ? ` ${color(`[${a.held_claims.length} claims]`, C.cyan)}` : '';
-      lines.push(`  ${statusIcon(status)} ${name}${stale}${claims}  ${dim(ageStr + ' ago')}`);
+      const claims = a.held_claims?.length ? `${a.held_claims.length} claims` : '0 claims';
+      const progress = a.progress ? String(a.progress).slice(0, 80) : 'No progress reported';
+      const boxLines = [
+        `${statusIcon(status, age)} ${name} ${statusLabel(status)}${a.is_stale ? ` ${color('STALE', C.red)}` : ''}`,
+        `${dim('Heartbeat')} ${dim('·')} ${ageStr} ago`,
+        `${dim('Claims')} ${dim('·')} ${color(claims, C.cyan)}`,
+        `${dim('Progress')} ${dim('·')} ${progress}`,
+      ];
+      lines.push(...renderBox(boxLines, agentColor(a.name ?? '?')));
+      lines.push('');
     }
     if (agents.length > shown.length) {
       lines.push(`  ${dim(`... and ${agents.length - shown.length} more`)}`);
     }
+    if (lines[lines.length - 1] === '') lines.pop();
     return lines.join('\n');
   },
 

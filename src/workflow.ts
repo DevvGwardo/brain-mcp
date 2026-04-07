@@ -112,17 +112,17 @@ const DOMAIN_BLUEPRINTS: DomainBlueprint[] = [
     ],
   },
   {
-    key: 'bridge',
-    role: 'bridge-runtime',
-    keywords: ['bridge', 'render', 'renderer', 'output', 'transport', 'response', 'http', 'stream'],
-    files: ['src/bridge.ts', 'src/renderer.ts', 'src/http.ts'],
+    key: 'transport',
+    role: 'transport-runtime',
+    keywords: ['render', 'renderer', 'output', 'transport', 'response', 'http', 'stream'],
+    files: ['src/renderer.ts', 'src/http.ts'],
     implementationTask: (goal, kind) =>
       kind === 'bugfix'
-        ? `Fix the bridge/rendering path affected by: ${goal}. Preserve payload compatibility while improving observable output quality.`
-        : `Wire the bridge, renderer, or transport surfaces needed for: ${goal}. Keep tool-response formatting and external interfaces coherent.`,
+        ? `Fix the transport/rendering path affected by: ${goal}. Preserve payload compatibility while improving observable output quality.`
+        : `Wire the renderer or transport surfaces needed for: ${goal}. Keep tool-response formatting and external interfaces coherent.`,
     acceptance: [
       'User-facing output shape is explicit and testable.',
-      'Bridge/transport behavior remains compatible with existing clients.',
+      'Transport behavior remains compatible with existing clients.',
     ],
   },
   {

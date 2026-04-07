@@ -1,8 +1,10 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import type { EmbeddingProvider } from './embeddings.js';
 
 export type SessionStatus = 'idle' | 'working' | 'done' | 'failed';
 
@@ -147,6 +149,7 @@ export interface AgentMetric {
   room: string;
   agent_name: string;
   agent_id: string | null;
+  model: string | null;
   task_description: string | null;
   started_at: string | null;
   completed_at: string | null;
@@ -165,6 +168,17 @@ export interface MetricsSummary {
   successes: number;
   failures: number;
   avg_duration_seconds: number | null;
+  avg_gate_passes: number | null;
+  avg_tsc_errors: number | null;
+}
+
+export interface ModelMetricRow {
+  model: string;
+  total_tasks: number;
+  successes: number;
+  failures: number;
+  success_rate: number;
+  avg_duration: number | null;
   avg_gate_passes: number | null;
   avg_tsc_errors: number | null;
 }
@@ -197,6 +211,8 @@ export interface Checkpoint {
 
 export class BrainDB {
   private db: Database.Database;
+  public readonly events = new EventEmitter();
+  private embeddingProvider: EmbeddingProvider | null = null;
 
   constructor(dbPath?: string) {
     const resolvedPath = dbPath || join(homedir(), '.claude', 'brain', 'brain.db');
@@ -397,6 +413,31 @@ export class BrainDB {
 
     // Add exit_code column to sessions
     try { this.db.exec("ALTER TABLE sessions ADD COLUMN exit_code INTEGER"); } catch { /* already exists */ }
+
+    // Add embedding column to memory
+    try { this.db.exec("ALTER TABLE memory ADD COLUMN embedding BLOB"); } catch { /* already exists */ }
+
+    // Add model column to agent_metrics
+    try { this.db.exec("ALTER TABLE agent_metrics ADD COLUMN model TEXT"); } catch { /* already exists */ }
+
+    // Add priority column to task_graph
+    try { this.db.exec("ALTER TABLE task_graph ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"); } catch { /* already exists */ }
+
+    // Register cosine_similarity function for vector search
+    this.db.function('cosine_similarity', { deterministic: true }, (a: unknown, b: unknown) => {
+      if (!a || !b || !(a instanceof Buffer) || !(b instanceof Buffer)) return null;
+      const va = new Float32Array(a.buffer, a.byteOffset, a.byteLength / 4);
+      const vb = new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4);
+      if (va.length !== vb.length) return null;
+      let dot = 0, normA = 0, normB = 0;
+      for (let i = 0; i < va.length; i++) {
+        dot += va[i] * vb[i];
+        normA += va[i] * va[i];
+        normB += vb[i] * vb[i];
+      }
+      const denom = Math.sqrt(normA) * Math.sqrt(normB);
+      return denom === 0 ? 0 : dot / denom;
+    });
   }
 
   // ── Atomic Counters ──
@@ -525,9 +566,11 @@ export class BrainDB {
   }
 
   pulse(id: string, status: SessionStatus, progress?: string): boolean {
-    return this.db.prepare(
+    const ok = this.db.prepare(
       `UPDATE sessions SET last_heartbeat = datetime('now'), status = ?, progress = ? WHERE id = ?`
     ).run(status, progress || null, id).changes > 0;
+    if (ok) this.events.emit('pulse', { id, status, progress });
+    return ok;
   }
 
   /** Remove sessions with no heartbeat for over 5 minutes and their orphaned claims. */
@@ -609,6 +652,7 @@ export class BrainDB {
     const result = this.db.prepare(
       'INSERT INTO messages (channel, room, sender_id, sender_name, content, metadata) VALUES (?, ?, ?, ?, ?, ?)'
     ).run(channel, room, senderId, senderName, content, metadata || null);
+    this.events.emit('message', { channel, room, sender_name: senderName, content });
     return Number(result.lastInsertRowid);
   }
 
@@ -921,23 +965,74 @@ export class BrainDB {
       'SELECT id FROM memory WHERE room = ? AND key = ?'
     ).get(room, key) as { id: string } | undefined;
 
+    let id: string;
     if (existing) {
       this.db.prepare(
         `UPDATE memory SET content = ?, category = ?, updated_at = datetime('now'),
          created_by = ?, created_by_name = ? WHERE id = ?`
       ).run(content, category, createdBy, createdByName, existing.id);
-      return existing.id;
+      id = existing.id;
+    } else {
+      id = randomUUID();
+      this.db.prepare(
+        `INSERT INTO memory (id, room, key, content, category, created_by, created_by_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, room, key, content, category, createdBy, createdByName);
     }
 
-    const id = randomUUID();
-    this.db.prepare(
-      `INSERT INTO memory (id, room, key, content, category, created_by, created_by_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(id, room, key, content, category, createdBy, createdByName);
+    this.events.emit('memory', { id, key, category });
+
+    // Fire-and-forget: embed asynchronously if provider is available
+    if (this.embeddingProvider) {
+      const text = `${key} ${content}`;
+      this.embeddingProvider.embed(text)
+        .then(embedding => this.storeMemoryEmbedding(id, embedding))
+        .catch(() => { /* embedding failed — memory still stored without it */ });
+    }
+
     return id;
   }
 
-  recallMemory(room: string, query?: string, category?: string, limit = 20): MemoryEntry[] {
+  async recallMemory(room: string, query?: string, category?: string, limit = 20): Promise<MemoryEntry[]> {
+    // Try semantic search first if provider is available and query given
+    if (query && this.embeddingProvider) {
+      try {
+        const queryEmbedding = await this.embeddingProvider.embed(query);
+        const semanticResults = this.semanticRecall(room, queryEmbedding, category, limit);
+
+        if (semanticResults.length > 0) {
+          // Also get LIKE results for hybrid merge
+          const likeResults = this.recallMemoryLike(room, query, category, limit);
+
+          // Merge: deduplicate by id, weight semantic similarity + frequency
+          const seen = new Set<string>();
+          const merged: Array<MemoryEntry & { _score: number }> = [];
+
+          for (let i = 0; i < semanticResults.length; i++) {
+            const r = semanticResults[i];
+            seen.add(r.id);
+            merged.push({ ...r, _score: (r.similarity ?? 0) * 0.7 + (1 - i / semanticResults.length) * 0.3 });
+          }
+          for (let i = 0; i < likeResults.length; i++) {
+            const r = likeResults[i];
+            if (seen.has(r.id)) continue;
+            seen.add(r.id);
+            merged.push({ ...r, _score: 0.3 * (1 - i / likeResults.length) });
+          }
+
+          merged.sort((a, b) => b._score - a._score);
+          return merged.slice(0, limit).map(({ _score, ...rest }) => rest);
+        }
+      } catch {
+        // Embedding failed — fall through to LIKE search
+      }
+    }
+
+    return this.recallMemoryLike(room, query, category, limit);
+  }
+
+  /** Original LIKE-based recall — used as fallback and for hybrid merging. */
+  recallMemoryLike(room: string, query?: string, category?: string, limit = 20): MemoryEntry[] {
     let sql = 'SELECT * FROM memory WHERE room = ?';
     const params: (string | number)[] = [room];
 
@@ -946,7 +1041,6 @@ export class BrainDB {
       params.push(category);
     }
     if (query) {
-      // Search key and content
       sql += ' AND (key LIKE ? OR content LIKE ?)';
       const pattern = `%${query}%`;
       params.push(pattern, pattern);
@@ -988,6 +1082,50 @@ export class BrainDB {
     return this.db.prepare(
       'SELECT category, COUNT(*) as count FROM memory WHERE room = ? GROUP BY category ORDER BY count DESC'
     ).all(room) as Array<{ category: string; count: number }>;
+  }
+
+  // ── Embedding Support ──
+
+  setEmbeddingProvider(provider: EmbeddingProvider): void {
+    this.embeddingProvider = provider;
+  }
+
+  getEmbeddingProvider(): EmbeddingProvider | null {
+    return this.embeddingProvider;
+  }
+
+  storeMemoryEmbedding(id: string, embedding: Float32Array): void {
+    const buf = Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
+    this.db.prepare('UPDATE memory SET embedding = ? WHERE id = ?').run(buf, id);
+  }
+
+  semanticRecall(
+    room: string, queryEmbedding: Float32Array,
+    category?: string, limit = 10,
+  ): Array<MemoryEntry & { similarity: number }> {
+    const queryBuf = Buffer.from(queryEmbedding.buffer, queryEmbedding.byteOffset, queryEmbedding.byteLength);
+    let sql = `SELECT *, cosine_similarity(embedding, ?) as similarity
+               FROM memory WHERE room = ? AND embedding IS NOT NULL`;
+    const params: (Buffer | string | number)[] = [queryBuf, room];
+    if (category) {
+      sql += ' AND category = ?';
+      params.push(category);
+    }
+    sql += ' ORDER BY similarity DESC LIMIT ?';
+    params.push(limit);
+    const results = this.db.prepare(sql).all(...params) as Array<MemoryEntry & { similarity: number }>;
+
+    // Touch accessed entries
+    if (results.length > 0) {
+      const ids = results.map(r => r.id);
+      const placeholders = ids.map(() => '?').join(',');
+      this.db.prepare(
+        `UPDATE memory SET access_count = access_count + 1, last_accessed = datetime('now')
+         WHERE id IN (${placeholders})`
+      ).run(...ids);
+    }
+
+    return results;
   }
 
   // ── Task DAG ──
@@ -1039,7 +1177,7 @@ export class BrainDB {
 
   getReadyTasks(room: string, planId: string): TaskNode[] {
     return this.db.prepare(
-      `SELECT * FROM task_graph WHERE room = ? AND plan_id = ? AND status = 'ready' ORDER BY created_at`
+      `SELECT * FROM task_graph WHERE room = ? AND plan_id = ? AND status = 'ready' ORDER BY priority DESC, created_at`
     ).all(room, planId) as TaskNode[];
   }
 
@@ -1147,6 +1285,7 @@ export class BrainDB {
   recordMetric(
     room: string, agentName: string, agentId: string | null,
     data: {
+      model?: string;
       task_description?: string;
       started_at?: string;
       completed_at?: string;
@@ -1159,15 +1298,16 @@ export class BrainDB {
     }
   ): number {
     const result = this.db.prepare(
-      `INSERT INTO agent_metrics (room, agent_name, agent_id, task_description, started_at, completed_at,
+      `INSERT INTO agent_metrics (room, agent_name, agent_id, model, task_description, started_at, completed_at,
        duration_seconds, gate_passes, tsc_errors, contract_mismatches, files_changed, outcome)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
-      room, agentName, agentId,
+      room, agentName, agentId, data.model || null,
       data.task_description || null, data.started_at || null, data.completed_at || null,
       data.duration_seconds ?? null, data.gate_passes ?? 0, data.tsc_errors ?? 0,
       data.contract_mismatches ?? 0, data.files_changed ?? 0, data.outcome || 'unknown'
     );
+    this.events.emit('metric', { agent_name: agentName, outcome: data.outcome });
     return Number(result.lastInsertRowid);
   }
 
@@ -1194,6 +1334,21 @@ export class BrainDB {
          AVG(tsc_errors) as avg_tsc_errors
        FROM agent_metrics WHERE room = ? GROUP BY agent_name ORDER BY total_tasks DESC`
     ).all(room) as MetricsSummary[];
+  }
+
+  getModelMetrics(room: string): ModelMetricRow[] {
+    return this.db.prepare(
+      `SELECT
+         model,
+         COUNT(*) as total_tasks,
+         SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) as successes,
+         SUM(CASE WHEN outcome = 'failed' THEN 1 ELSE 0 END) as failures,
+         ROUND(1.0 * SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) / COUNT(*), 3) as success_rate,
+         AVG(duration_seconds) as avg_duration,
+         AVG(gate_passes) as avg_gate_passes,
+         AVG(tsc_errors) as avg_tsc_errors
+       FROM agent_metrics WHERE room = ? AND model IS NOT NULL GROUP BY model ORDER BY total_tasks DESC`
+    ).all(room) as ModelMetricRow[];
   }
 
   // ── Context Ledger ──

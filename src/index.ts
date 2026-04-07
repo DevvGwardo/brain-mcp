@@ -10,6 +10,8 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { BrainDB } from './db.js';
 import { runGate, runGateAndNotify } from './gate.js';
+import { createEmbeddingProvider } from './embeddings.js';
+import { TaskRouter } from './router.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
 // Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
@@ -48,6 +50,10 @@ const cArr = <T extends z.ZodTypeAny>(item: T) => z.preprocess(
 const db = new BrainDB(process.env.BRAIN_DB_PATH);
 const room = process.env.BRAIN_ROOM || process.cwd();
 const roomLabel = basename(room);
+
+// Initialize embedding provider for semantic memory (silent no-op if no API key)
+const embeddingProvider = createEmbeddingProvider();
+if (embeddingProvider) db.setEmbeddingProvider(embeddingProvider);
 
 let sessionId: string | null = process.env.BRAIN_SESSION_ID || null;
 let spawnedAgentCount = 0;
@@ -1066,7 +1072,7 @@ Always check memory at the start of a task — previous agents may have discover
   },
   async ({ query, category, limit }) => {
     ensureSession();
-    const memories = db.recallMemory(room, query, category, limit);
+    const memories = await db.recallMemory(room, query, category, limit);
     const categories = db.listMemoryCategories(room);
     return {
       content: [{
@@ -1437,6 +1443,7 @@ server.tool(
   {
     agent_name: z.string().describe('Agent name'),
     agent_id: z.string().optional().describe('Agent session ID'),
+    model: z.string().optional().describe('Model used for this task (e.g. "opus", "sonnet", "haiku")'),
     outcome: z.enum(['success', 'partial', 'failed']).describe('How the task went'),
     task_description: z.string().optional().describe('What the agent was doing'),
     duration_seconds: cNum().optional().describe('How long the task took'),
@@ -1445,10 +1452,10 @@ server.tool(
     contract_mismatches: cNum().optional().describe('Number of contract mismatches'),
     files_changed: cNum().optional().describe('Number of files modified'),
   },
-  async ({ agent_name, agent_id, outcome, task_description, duration_seconds, gate_passes, tsc_errors, contract_mismatches, files_changed }) => {
+  async ({ agent_name, agent_id, model, outcome, task_description, duration_seconds, gate_passes, tsc_errors, contract_mismatches, files_changed }) => {
     ensureSession();
     const id = db.recordMetric(room, agent_name, agent_id || null, {
-      outcome, task_description, duration_seconds,
+      model, outcome, task_description, duration_seconds,
       gate_passes, tsc_errors, contract_mismatches, files_changed,
     });
     return {
@@ -1504,10 +1511,11 @@ server.tool(
     name: z.string().optional().describe('Name for the new agent session (default: "agent-<timestamp>")'),
     layout: z.enum(['vertical', 'horizontal', 'tiled', 'window', 'headless']).optional().describe('"horizontal" = side by side (default). "vertical" = stacked. "tiled" = auto-grid. "window" = new tmux tab. "headless" = background process (no tmux needed).'),
     model: z.string().optional().describe('Model to use for this agent. For Claude Code: "opus", "sonnet", "haiku", or full model ID. Enables multi-LLM routing — use cheap models for boilerplate, expensive for complex logic.'),
+    auto_route: cBool().optional().describe('Auto-select the best model based on task complexity and historical metrics. Ignored if model is explicitly set.'),
     timeout: cNum().optional().describe('Timeout in seconds. Default: 3600 (1 hour). Set 0 for no timeout.'),
     cli: z.string().optional().describe('Custom CLI command to spawn instead of "claude" (e.g. "codex", "aider"). The agent will still use brain tools if the CLI supports MCP.'),
   },
-  async ({ task, name, layout, model, timeout: timeoutSec, cli }) => {
+  async ({ task, name, layout, model: modelParam, auto_route, timeout: timeoutSec, cli }) => {
     const sid = ensureSession();
     startLeadWatchdog(sid);
     const agentName = name || `agent-${Date.now()}`;
@@ -1516,6 +1524,17 @@ server.tool(
     const spawnLayout = layout || 'horizontal';
     const isHeadless = spawnLayout === 'headless';
     const agentTimeout = timeoutSec ?? (isHeadless ? 1800 : 3600);
+
+    // Auto-route: pick the best model based on task complexity + metrics
+    let model = modelParam;
+    if (auto_route && !model) {
+      const router = new TaskRouter(db, room);
+      const rec = router.routeTask(task);
+      model = rec.model;
+      db.pushContext(room, sid, sessionName, 'decision',
+        `Auto-routed "${agentName}" to model ${model} (confidence: ${rec.confidence}, complexity: ${rec.complexity})`,
+        rec.reasoning, undefined, ['auto-route']);
+    }
 
     // Tmux modes require tmux
     if (!isHeadless) {
@@ -1838,6 +1857,31 @@ rm -f "${watcherFile}"
         isError: true,
       };
     }
+  }
+);
+
+// ═══════════════════════════════════════
+//  Smart Task Router
+// ═══════════════════════════════════════
+
+server.tool(
+  'route',
+  `Get a model recommendation for a task based on historical performance data.
+Returns the recommended model, confidence score, complexity classification, and reasoning.
+Use this before brain_wake to auto-select the best model for the job.`,
+  {
+    task: z.string().describe('Task description to route'),
+    available_models: cArr(z.string()).optional().describe('Models available to choose from (e.g. ["haiku", "sonnet", "opus"])'),
+    prefer_speed: cBool().optional().describe('Prefer faster models over higher quality (default: false)'),
+    prefer_quality: cBool().optional().describe('Prefer higher quality models over speed (default: false)'),
+  },
+  async ({ task, available_models, prefer_speed, prefer_quality }) => {
+    ensureSession();
+    const router = new TaskRouter(db, room);
+    const recommendation = router.routeTask(task, { available_models, prefer_speed, prefer_quality });
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(recommendation, null, 2) }],
+    };
   }
 );
 
@@ -2552,6 +2596,14 @@ Monitor with agents and plan_status.`,
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // Start HTTP server if BRAIN_HTTP_PORT is set (runs alongside stdio)
+  const httpPort = process.env.BRAIN_HTTP_PORT ? parseInt(process.env.BRAIN_HTTP_PORT, 10) : null;
+  if (httpPort) {
+    const { startHttpServer } = await import('./http.js');
+    const httpHost = process.env.BRAIN_HTTP_HOST || '127.0.0.1';
+    await startHttpServer(db, room, httpPort, httpHost);
+  }
 }
 
 main().catch((err) => {

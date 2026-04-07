@@ -484,7 +484,22 @@ export class BrainDB {
     ).run(status, progress || null, id).changes > 0;
   }
 
+  /** Remove sessions with no heartbeat for over 5 minutes and their orphaned claims. */
+  pruneStaleSessions(): number {
+    const result = this.db.prepare(
+      `DELETE FROM sessions WHERE last_heartbeat < datetime('now', '-5 minutes')`
+    ).run();
+    if (result.changes > 0) {
+      // Clean up orphaned claims from deleted sessions
+      this.db.prepare(
+        `DELETE FROM claims WHERE owner_id NOT IN (SELECT id FROM sessions)`
+      ).run();
+    }
+    return result.changes;
+  }
+
   getAgentHealth(room?: string): AgentHealth[] {
+    this.pruneStaleSessions();
     this.pruneClaims();
     const filter = room ? `WHERE room = ?` : ``;
     const params = room ? [room] : [];
@@ -523,6 +538,7 @@ export class BrainDB {
   }
 
   getSessions(room?: string): Session[] {
+    this.pruneStaleSessions();
     if (room) {
       return this.db.prepare(
         "SELECT * FROM sessions WHERE room = ? AND last_heartbeat > datetime('now', '-5 minutes') ORDER BY created_at"

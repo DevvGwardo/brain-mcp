@@ -305,7 +305,20 @@ class BrainDB:
         self.conn.commit()
         return r.rowcount > 0
 
+    def prune_stale_sessions(self) -> int:
+        """Remove sessions with no heartbeat for over 5 minutes and their orphaned claims."""
+        r = self.conn.execute(
+            "DELETE FROM sessions WHERE last_heartbeat < datetime('now', '-5 minutes')"
+        )
+        if r.rowcount > 0:
+            self.conn.execute(
+                "DELETE FROM claims WHERE owner_id NOT IN (SELECT id FROM sessions)"
+            )
+        self.conn.commit()
+        return r.rowcount
+
     def get_sessions(self, room: Optional[str] = None) -> list[Session]:
+        self.prune_stale_sessions()
         if room:
             rows = self.conn.execute(
                 "SELECT * FROM sessions WHERE room = ? AND last_heartbeat > datetime('now', '-5 minutes') ORDER BY created_at",
@@ -322,6 +335,7 @@ class BrainDB:
         return Session(**dict(r)) if r else None
 
     def get_agent_health(self, room: Optional[str] = None) -> list[AgentHealth]:
+        self.prune_stale_sessions()
         self._prune_claims()
         filt = "WHERE room = ?" if room else ""
         params = (room,) if room else ()

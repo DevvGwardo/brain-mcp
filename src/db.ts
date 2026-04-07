@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { EmbeddingProvider } from './embeddings.js';
 
-export type SessionStatus = 'idle' | 'working' | 'done' | 'failed';
+export type SessionStatus = 'idle' | 'queued' | 'working' | 'done' | 'failed';
 
 export interface Session {
   id: string;
@@ -183,6 +183,47 @@ export interface ModelMetricRow {
   avg_tsc_errors: number | null;
 }
 
+// ── Spawn Metrics ──
+
+export interface SpawnMetric {
+  id: number;
+  room: string;
+  agent_name: string;
+  agent_id: string | null;
+  session_id: string;
+  spawn_started_at: string;
+  spawn_completed_at: string | null;
+  first_heartbeat_at: string | null;
+  heartbeat_interval_seconds: number | null;
+  spawn_duration_ms: number | null;
+  spawn_success: number;
+  spawn_error: string | null;
+  memory_usage_bytes: number | null;
+  cpu_usage_percent: number | null;
+  task_description: string | null;
+  created_at: string;
+}
+
+export interface SpawnMetricSummary {
+  agent_name: string;
+  total_spawns: number;
+  successful_spawns: number;
+  failed_spawns: number;
+  avg_spawn_duration_ms: number | null;
+  avg_heartbeat_interval_seconds: number | null;
+  success_rate: number | null;
+  avg_memory_bytes: number | null;
+  avg_cpu_percent: number | null;
+}
+
+export interface SpawnTimingTrend {
+  time_bucket: string; // hourly bucket like "2026-04-07 15:00"
+  total_spawns: number;
+  successful_spawns: number;
+  failed_spawns: number;
+  avg_spawn_duration_ms: number | null;
+}
+
 // ── Context Ledger ──
 
 export type ContextEntryType = 'action' | 'discovery' | 'decision' | 'error' | 'file_change' | 'checkpoint';
@@ -215,12 +256,51 @@ export class BrainDB {
   public readonly events = new EventEmitter();
   private embeddingProvider: EmbeddingProvider | null = null;
 
+  // ── Statement Cache ──────────────────────────────────────────────────────────
+  // Pre-compiled statements eliminate prepare() overhead on every call.
+  // Key hot paths (pulse, heartbeat, message post/read) hit these repeatedly.
+  private _stmtCache = new Map<string, Database.Statement>();
+
+  private _cacheStmt(sql: string): Database.Statement {
+    let stmt = this._stmtCache.get(sql);
+    if (!stmt) {
+      stmt = this.db.prepare(sql);
+      this._stmtCache.set(sql, stmt);
+    }
+    return stmt;
+  }
+
   constructor(dbPath?: string) {
     const resolvedPath = dbPath || join(homedir(), '.claude', 'brain', 'brain.db');
     mkdirSync(dirname(resolvedPath), { recursive: true });
     this.db = new Database(resolvedPath);
+
+    // WAL mode: concurrent readers don't block writers, writers don't block readers.
+    // Critical for multi-agent use where many agents query simultaneously.
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('busy_timeout = 5000');
+    // NORMAL sync is safe with WAL — skips one fsync per write, ~2-3x faster.
+    this.db.pragma('synchronous = NORMAL');
+    // shared memory for WAL reduces lock contention between connections.
+    this.db.pragma('read_uncommitted = 1');
+
+    // ── Pre-warm critical hot-path statements ──────────────────────────────────
+    // heartbeat / pulse — called every ~30s per agent session
+    this._cacheStmt("UPDATE sessions SET last_heartbeat = datetime('now') WHERE id = ?");
+    this._cacheStmt("UPDATE sessions SET last_heartbeat = datetime('now'), status = ?, progress = ? WHERE id = ?");
+    this._cacheStmt("SELECT * FROM sessions WHERE id = ?");
+    // messages — per post and read
+    this._cacheStmt('SELECT * FROM messages WHERE channel = ? AND room = ? AND id > ? ORDER BY id ASC LIMIT ?');
+    // claims — prune and query
+    this._cacheStmt('DELETE FROM claims WHERE (expires_at IS NOT NULL AND datetime(expires_at) <= datetime(\'now\')) OR owner_id NOT IN (SELECT id FROM sessions WHERE last_heartbeat > datetime(\'now\', \'-90 seconds\'))');
+    this._cacheStmt("DELETE FROM sessions WHERE last_heartbeat < datetime('now', '-5 minutes')");
+    // state
+    this._cacheStmt('SELECT * FROM state WHERE key = ? AND scope = ?');
+    this._cacheStmt('SELECT value FROM state WHERE key = ? AND scope = ?');
+    // sessions health (most expensive — pre-warm the complex view)
+    this._cacheStmt(`SELECT *, CAST((julianday('now') - julianday(last_heartbeat)) * 86400 AS INTEGER) AS heartbeat_age_seconds FROM sessions ORDER BY created_at`);
+    this._cacheStmt('SELECT resource, owner_id FROM claims');
+
     this.migrate();
   }
 
@@ -419,12 +499,41 @@ export class BrainDB {
     // Add embedding column to memory
     try { this.db.exec("ALTER TABLE memory ADD COLUMN embedding BLOB"); } catch { /* already exists */ }
 
-    // Add model column to agent_metrics
     try { this.db.exec("ALTER TABLE agent_metrics ADD COLUMN model TEXT"); } catch { /* already exists */ }
 
     // Add priority column to task_graph
     try { this.db.exec("ALTER TABLE task_graph ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"); } catch { /* already exists */ }
     try { this.db.exec("ALTER TABLE checkpoints ADD COLUMN ledger_entry_id INTEGER"); } catch { /* already exists */ }
+
+    // Add spawn_timing columns to sessions
+    try { this.db.exec("ALTER TABLE sessions ADD COLUMN spawn_timing_seconds REAL"); } catch { /* already exists */ }
+    try { this.db.exec("ALTER TABLE sessions ADD COLUMN memory_usage_bytes INTEGER"); } catch { /* already exists */ }
+    try { this.db.exec("ALTER TABLE sessions ADD COLUMN first_heartbeat_at TEXT"); } catch { /* already exists */ }
+    try { this.db.exec("ALTER TABLE sessions ADD COLUMN cpu_usage_percent REAL"); } catch { /* already exists */ }
+
+    // Add spawn_metrics table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS spawn_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        agent_id TEXT,
+        session_id TEXT NOT NULL,
+        spawn_started_at TEXT NOT NULL,
+        spawn_completed_at TEXT,
+        first_heartbeat_at TEXT,
+        heartbeat_interval_seconds REAL,
+        spawn_duration_ms INTEGER,
+        spawn_success INTEGER NOT NULL DEFAULT 0,
+        spawn_error TEXT,
+        memory_usage_bytes INTEGER,
+        cpu_usage_percent REAL,
+        task_description TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_spawn_metrics_room ON spawn_metrics(room)"); } catch { /* already exists */ }
+    try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_spawn_metrics_session ON spawn_metrics(session_id)"); } catch { /* already exists */ }
 
     // Register cosine_similarity function for vector search
     this.db.function('cosine_similarity', { deterministic: true }, (a: unknown, b: unknown) => {
@@ -563,17 +672,56 @@ export class BrainDB {
   }
 
   heartbeat(id: string): boolean {
-    return this.db.prepare(
+    return this._cacheStmt(
       "UPDATE sessions SET last_heartbeat = datetime('now') WHERE id = ?"
     ).run(id).changes > 0;
   }
 
   pulse(id: string, status: SessionStatus, progress?: string): boolean {
-    const ok = this.db.prepare(
+    const ok = this._cacheStmt(
       `UPDATE sessions SET last_heartbeat = datetime('now'), status = ?, progress = ? WHERE id = ?`
     ).run(status, progress || null, id).changes > 0;
     if (ok) this.events.emit('pulse', { id, status, progress });
     return ok;
+  }
+
+  /**
+   * Record a regular pulse (no status change, just heartbeat timestamp).
+   * Returns true if the session was found and updated.
+   */
+  recordHeartbeat(id: string): boolean {
+    return this._cacheStmt(
+      "UPDATE sessions SET last_heartbeat = datetime('now') WHERE id = ?"
+    ).run(id).changes > 0;
+  }
+
+  /**
+   * Pulse with first-heartbeat confirmation: transitions 'queued' → 'working'.
+   * Subsequent pulses (when already 'working') are just timestamp updates.
+   * This ensures sessions are not marked 'working' until the agent has
+   * actually called back with a confirmed heartbeat.
+   */
+  pulseWithFirstConfirm(id: string, status: SessionStatus, progress?: string): boolean {
+    const session = this.getSession(id);
+    if (!session) return false;
+
+    // If session is still 'queued' and this pulse says 'working', confirm the transition
+    if (session.status === 'queued' && status === 'working') {
+      return this.pulse(id, 'working', progress);
+    }
+
+    // Allow 'working' → 'done' / 'failed' from the agent
+    if (['working', 'queued'].includes(session.status) && ['done', 'failed'].includes(status)) {
+      return this.pulse(id, status, progress);
+    }
+
+    // Subsequent heartbeats while 'working' — just touch the timestamp
+    if (session.status === 'working' && status === 'working') {
+      return this.recordHeartbeat(id);
+    }
+
+    // For any other case (e.g. already 'done'/'failed'), no-op
+    return false;
   }
 
   /** Remove sessions with no heartbeat for over 5 minutes and their orphaned claims. */
@@ -583,6 +731,25 @@ export class BrainDB {
     ).run();
     if (result.changes > 0) {
       // Clean up orphaned claims from deleted sessions
+      this.db.prepare(
+        `DELETE FROM claims WHERE owner_id NOT IN (SELECT id FROM sessions)`
+      ).run();
+    }
+    return result.changes;
+  }
+
+  /**
+   * Ghost cleanup: sweep for sessions stuck in 'queued' for too long
+   * (spawn died before ever sending a heartbeat) and mark them 'failed'.
+   * Runs as a periodic sweep (call this from a timer/interval).
+   */
+  sweepGhostSessions(ghostThresholdMinutes = 3): number {
+    const result = this.db.prepare(
+      `UPDATE sessions SET status = 'failed', progress = 'ghost: no heartbeat received'
+       WHERE status = 'queued'
+         AND last_heartbeat < datetime('now', ?)`
+    ).run(`-${ghostThresholdMinutes} minutes`);
+    if (result.changes > 0) {
       this.db.prepare(
         `DELETE FROM claims WHERE owner_id NOT IN (SELECT id FROM sessions)`
       ).run();
@@ -626,7 +793,7 @@ export class BrainDB {
   }
 
   getSession(id: string): Session | undefined {
-    return this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as Session | undefined;
+    return this._cacheStmt('SELECT * FROM sessions WHERE id = ?').get(id) as Session | undefined;
   }
 
   getSessions(room?: string): Session[] {
@@ -645,6 +812,21 @@ export class BrainDB {
     this.db.prepare('UPDATE sessions SET exit_code = ? WHERE id = ?').run(exit_code, session_id);
   }
 
+  setSessionPid(session_id: string, pid: number): void {
+    this.db.prepare('UPDATE sessions SET pid = ? WHERE id = ?').run(pid, session_id);
+  }
+
+  /** Transition session to 'working' only after confirmed process start. */
+  transitionToWorking(session_id: string, progress?: string): boolean {
+    return this.pulse(session_id, 'working', progress);
+  }
+
+  /** Mark session done (or failed) with exit code. */
+  markDone(session_id: string, exit_code: number, failed: boolean, progress?: string): boolean {
+    this.set_exit_code(session_id, exit_code);
+    return this.pulse(session_id, failed ? 'failed' : 'done', progress);
+  }
+
   // ── Channel Messaging ──
 
   postMessage(
@@ -660,7 +842,7 @@ export class BrainDB {
   }
 
   getMessages(channel: string, room: string, sinceId?: number, limit?: number): Message[] {
-    return this.db.prepare(
+    return this._cacheStmt(
       'SELECT * FROM messages WHERE channel = ? AND room = ? AND id > ? ORDER BY id ASC LIMIT ?'
     ).all(channel, room, sinceId || 0, limit || 50) as Message[];
   }
@@ -1354,6 +1536,131 @@ export class BrainDB {
     ).all(room) as ModelMetricRow[];
   }
 
+  // ── Spawn Metrics ──
+
+  /**
+   * Record that an agent spawn has started (just before exec/spawn call).
+   */
+  recordSpawnStarted(
+    room: string, agentName: string, sessionId: string,
+    taskDescription?: string, agentId?: string
+  ): number {
+    const result = this.db.prepare(
+      `INSERT INTO spawn_metrics (room, agent_name, agent_id, session_id, spawn_started_at, task_description)
+       VALUES (?, ?, ?, ?, datetime('now'), ?)`
+    ).run(room, agentName, agentId || null, sessionId, taskDescription || null);
+    this.events.emit('spawn_started', { session_id: sessionId, agent_name: agentName, room });
+    return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * Record successful spawn completion + first heartbeat arrival.
+   * Computes spawn_duration_ms and heartbeat_interval_seconds.
+   */
+  recordSpawnSuccess(
+    sessionId: string,
+    memoryBytes?: number,
+    cpuPercent?: number
+  ): void {
+    const now = "datetime('now')";
+    this.db.prepare(
+      `UPDATE spawn_metrics SET
+         spawn_completed_at = datetime('now'),
+         first_heartbeat_at = datetime('now'),
+         spawn_duration_ms = CAST((julianday(datetime('now')) - julianday(spawn_started_at)) * 86400000 AS INTEGER),
+         spawn_success = 1,
+         memory_usage_bytes = ?,
+         cpu_usage_percent = ?
+       WHERE session_id = ? AND spawn_success = 0`
+    ).run(memoryBytes ?? null, cpuPercent ?? null, sessionId);
+  }
+
+  /**
+   * Record a failed spawn (spawn process errored).
+   */
+  recordSpawnFailure(sessionId: string, error: string): void {
+    this.db.prepare(
+      `UPDATE spawn_metrics SET
+         spawn_completed_at = datetime('now'),
+         spawn_success = 0,
+         spawn_error = ?
+       WHERE session_id = ? AND spawn_success = 0`
+    ).run(error, sessionId);
+  }
+
+  /**
+   * Record a heartbeat interval measurement for an active session.
+   */
+  recordHeartbeatInterval(sessionId: string, intervalSeconds: number): void {
+    this.db.prepare(
+      `UPDATE spawn_metrics SET
+         heartbeat_interval_seconds = ?
+       WHERE session_id = ? AND first_heartbeat_at IS NOT NULL`
+    ).run(intervalSeconds, sessionId);
+  }
+
+  getSpawnMetrics(room: string, agentName?: string, limit = 50): SpawnMetric[] {
+    if (agentName) {
+      return this.db.prepare(
+        'SELECT * FROM spawn_metrics WHERE room = ? AND agent_name = ? ORDER BY created_at DESC LIMIT ?'
+      ).all(room, agentName, limit) as SpawnMetric[];
+    }
+    return this.db.prepare(
+      'SELECT * FROM spawn_metrics WHERE room = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(room, limit) as SpawnMetric[];
+  }
+
+  getSpawnMetricsSummary(room: string): SpawnMetricSummary[] {
+    return this.db.prepare(
+      `SELECT
+         agent_name,
+         COUNT(*) as total_spawns,
+         SUM(spawn_success) as successful_spawns,
+         SUM(CASE WHEN spawn_success = 0 THEN 1 ELSE 0 END) as failed_spawns,
+         AVG(spawn_duration_ms) as avg_spawn_duration_ms,
+         AVG(heartbeat_interval_seconds) as avg_heartbeat_interval_seconds,
+         ROUND(1.0 * SUM(spawn_success) / COUNT(*), 3) as success_rate,
+         AVG(memory_usage_bytes) as avg_memory_bytes,
+         AVG(cpu_usage_percent) as avg_cpu_percent
+       FROM spawn_metrics WHERE room = ? GROUP BY agent_name ORDER BY total_spawns DESC`
+    ).all(room) as SpawnMetricSummary[];
+  }
+
+  getSpawnTimingTrend(room: string, hours = 24): SpawnTimingTrend[] {
+    return this.db.prepare(
+      `SELECT
+         strftime('%Y-%m-%d %H:00', created_at) as time_bucket,
+         COUNT(*) as total_spawns,
+         SUM(spawn_success) as successful_spawns,
+         SUM(CASE WHEN spawn_success = 0 THEN 1 ELSE 0 END) as failed_spawns,
+         AVG(spawn_duration_ms) as avg_spawn_duration_ms
+       FROM spawn_metrics
+       WHERE room = ? AND created_at >= datetime('now', ?)
+       GROUP BY time_bucket
+       ORDER BY time_bucket ASC`
+    ).all(room, `-${hours} hours`) as SpawnTimingTrend[];
+  }
+
+  /** Update session resource usage fields (called periodically by watchdog). */
+  updateSessionResources(sessionId: string, memoryBytes: number, cpuPercent: number): void {
+    this.db.prepare(
+      `UPDATE sessions SET
+         memory_usage_bytes = ?,
+         cpu_usage_percent = ?
+       WHERE id = ?`
+    ).run(memoryBytes, cpuPercent, sessionId);
+  }
+
+  /** Record that the first heartbeat for a session arrived (for spawn_timing calc). */
+  recordSessionFirstHeartbeat(sessionId: string): void {
+    this.db.prepare(
+      `UPDATE sessions SET
+         first_heartbeat_at = datetime('now'),
+         spawn_timing_seconds = CAST((julianday(datetime('now')) - julianday(created_at)) * 86400 AS REAL)
+       WHERE id = ?`
+    ).run(sessionId);
+  }
+
   // ── Context Ledger ──
 
   pushContext(
@@ -1486,6 +1793,7 @@ export class BrainDB {
   }
 
   close(): void {
+    this._stmtCache.clear();
     this.db.close();
   }
 }

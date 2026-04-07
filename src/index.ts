@@ -5,7 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { basename, join, resolve } from 'node:path';
 import { execSync, spawn } from 'node:child_process';
-import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, symlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,7 @@ import { createEmbeddingProvider } from './embeddings.js';
 import { TaskRouter } from './router.js';
 import { registerAutopilot, minimalAgentPrompt } from './autopilot.js';
 import { compileWorkflow } from './workflow.js';
+import { spawnWithRecovery, cleanupSpawnTempFiles } from './spawn-recovery.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
 // Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
@@ -58,8 +59,52 @@ const roomLabel = basename(room);
 const embeddingProvider = createEmbeddingProvider();
 if (embeddingProvider) db.setEmbeddingProvider(embeddingProvider);
 
+// ── Startup temp file cleanup ──
+// Remove any stale temp files from previous crashed/killed processes on startup.
+const TEMP_FILE_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+const TEMP_FILE_PATTERNS = [
+  'brain-prompt-', 'brain-swarm-', 'brain-watch-',
+  'brain-exit-', 'brain-pid-', 'brain-agent-',
+];
+(function startupTempCleanup() {
+  let removed = 0;
+  const now = Date.now();
+  try {
+    const files = readdirSync(tmpdir());
+    for (const file of files) {
+      if (!TEMP_FILE_PATTERNS.some(p => file.startsWith(p))) continue;
+      const filePath = join(tmpdir(), file);
+      try {
+        const stat = statSync(filePath);
+        if (now - stat.mtimeMs > TEMP_FILE_MAX_AGE_MS) {
+          unlinkSync(filePath);
+          removed++;
+        }
+      } catch { /* skip inaccessible */ }
+    }
+  } catch { /* tmpdir may not exist */ }
+  if (removed > 0) {
+    console.error(`[brain-mcp] Cleaned up ${removed} stale temp file(s) on startup`);
+  }
+})();
+
 let sessionId: string | null = process.env.BRAIN_SESSION_ID || null;
 let spawnedAgentCount = 0;
+
+// ── Ghost session cleanup sweep ──
+// Periodically sweep for sessions stuck in 'queued' that never received a heartbeat
+// (e.g. spawn process died before the agent could call back). This prevents failed
+// spawns from polluting metrics as "active working" sessions.
+const GHOST_SWEEP_INTERVAL_MS = 30_000; // every 30 seconds
+setInterval(() => {
+  try {
+    const cleaned = db.sweepGhostSessions(3); // 3-minute threshold for ghosts
+    if (cleaned > 0) {
+      // Log to stderr so it shows up in server logs but doesn't break the MCP protocol
+      console.error(`[brain] ghost sweep: cleaned ${cleaned} stale-queued sessions`);
+    }
+  } catch { /* best-effort */ }
+}, GHOST_SWEEP_INTERVAL_MS);
 
 // ── Compact mode — reduce token cost of tool responses ──
 // Enable via BRAIN_COMPACT=1 env var, or toggle at runtime via the `compact` tool.
@@ -364,6 +409,93 @@ Call with enabled=true at the start of a session to save tokens.`,
 );
 
 // ═══════════════════════════════════════
+//  Metrics & Observability
+// ═══════════════════════════════════════
+
+server.tool(
+  'brain_metrics',
+  `Query agent and spawn metrics for observability. Returns:
+- summary: per-agent aggregate (success/fail rates, avg duration, spawn timing)
+- history: individual metric records (last N)
+- spawn_summary: spawn success/fail rates, avg spawn duration, resource usage
+- spawn_history: individual spawn records
+- spawn_trend: hourly time-series of spawn activity over the last N hours
+- model_metrics: performance breakdown by model
+- session_resources: current resource usage for active sessions`,
+  {
+    view: z.enum(['summary', 'history', 'spawn_summary', 'spawn_history', 'spawn_trend', 'model_metrics', 'session_resources'])
+      .optional().describe('Which metrics view to return (default: summary)'),
+    agent: z.string().optional().describe('Filter metrics to a specific agent name'),
+    limit: cNum().optional().describe('Max records for history views (default: 50)'),
+    hours: cNum().optional().describe('Hours for spawn_trend (default: 24)'),
+  },
+  async ({ view, agent, limit, hours }) => {
+    ensureSession();
+    const l = limit ?? 50;
+    const h = hours ?? 24;
+
+    switch (view) {
+      case 'history':
+        return reply(db.getMetrics(room, agent, l));
+      case 'spawn_summary':
+        return reply(db.getSpawnMetricsSummary(room));
+      case 'spawn_history':
+        return reply(db.getSpawnMetrics(room, agent, l));
+      case 'spawn_trend':
+        return reply(db.getSpawnTimingTrend(room, h));
+      case 'model_metrics':
+        return reply(db.getModelMetrics(room));
+      case 'session_resources': {
+        const sessions = db.getSessions(room);
+        return reply(sessions.map((s: any) => ({
+          id: s.id, name: s.name, status: s.status,
+          spawn_timing_seconds: s.spawn_timing_seconds,
+          memory_usage_bytes: s.memory_usage_bytes,
+          cpu_usage_percent: s.cpu_usage_percent,
+          last_heartbeat: s.last_heartbeat,
+        })));
+      }
+      default: {
+        // Default summary: agent task metrics + spawn metrics side by side
+        const agentMetrics = db.getMetricsSummary(room);
+        const spawnMetrics = db.getSpawnMetricsSummary(room);
+        const trend = db.getSpawnTimingTrend(room, h);
+        return reply({ agent_metrics: agentMetrics, spawn_metrics: spawnMetrics, spawn_trend: trend });
+      }
+    }
+  }
+);
+
+server.tool(
+  'brain_metric_record',
+  `Record the outcome of an agent task for metrics tracking. Call this when a task completes (success or failure).`,
+  {
+    agent_name: z.string().describe('Name of the agent that completed the task'),
+    agent_id: z.string().optional().describe('Agent session ID'),
+    model: z.string().optional().describe('Model used (e.g. claude-sonnet-4-5)'),
+    task_description: z.string().optional().describe('What the agent was trying to do'),
+    duration_seconds: cNum().optional().describe('How long the task took'),
+    gate_passes: cNum().optional().describe('Number of gate passes'),
+    tsc_errors: cNum().optional().describe('TypeScript errors at gate'),
+    contract_mismatches: cNum().optional().describe('Contract mismatches found'),
+    files_changed: cNum().optional().describe('Files modified'),
+    outcome: z.enum(['success', 'failed', 'unknown']).optional().describe('Task outcome (default: success)'),
+  },
+  async (params) => {
+    ensureSession();
+    const { agent_name, agent_id, model, task_description, duration_seconds,
+      gate_passes, tsc_errors, contract_mismatches, files_changed, outcome } = params;
+    db.recordMetric(room, agent_name, agent_id ?? null, {
+      model, task_description, duration_seconds,
+      gate_passes: gate_passes ?? 0, tsc_errors: tsc_errors ?? 0,
+      contract_mismatches: contract_mismatches ?? 0,
+      files_changed: files_changed ?? 0, outcome: outcome ?? 'success',
+    });
+    return reply({ ok: 1, agent_name, outcome: outcome ?? 'success' });
+  }
+);
+
+// ═══════════════════════════════════════
 //  Identity & Discovery
 // ═══════════════════════════════════════
 
@@ -425,9 +557,12 @@ server.tool(
   },
   async ({ status, progress }) => {
     const sid = ensureSession();
-    if (!db.pulse(sid, status, progress)) {
+    // pulseWithFirstConfirm ensures 'queued' sessions only transition to 'working'
+    // on the first confirmed heartbeat from the agent — not at pre-registration time.
+    if (!db.pulseWithFirstConfirm(sid, status, progress)) {
+      // Session missing (e.g. crash cleanup) — re-register as 'queued' (not 'working')
       db.registerSession(sessionName, room, undefined, sid);
-      db.pulse(sid, status, progress);
+      db.pulseWithFirstConfirm(sid, status, progress);
     }
     // Auto-consume unread DMs so agents stay coordinated without extra calls
     const pending = db.consumeInbox(sid);
@@ -1086,13 +1221,18 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
         // Post task for audit trail
         const taskId = db.postMessage('tasks', room, sid, sessionName, agentCfg.task);
 
-        // Pre-register
+        // Register session in 'queued' state — it will transition to 'working'
+        // only when the agent sends its first confirmed pulse via pulseWithFirstConfirm.
+        // No direct pulse() call here — leaving it 'queued' so sweepGhostSessions
+        // can catch it if the spawn fails before the agent ever heartbeats.
         db.registerSession(
           agentName, room,
           JSON.stringify({ parent_session_id: sid, task_id: taskId, swarm: true, workspace: workspacePath }),
           agentSessionId,
         );
-        db.pulse(agentSessionId, 'working', 'spawned by swarm; initializing');
+        // Immediately set to 'queued' (not 'working') so the lifecycle is:
+        // queued → working (on first agent heartbeat) → done/failed
+        db.pulse(agentSessionId, 'queued', `swarm queued; depends_on=${JSON.stringify(agentCfg.depends_on)}`);
 
         // Build env
         const childEnvParts = [
@@ -1144,13 +1284,24 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           }
         }
 
-        // Spawn as background process
-        const watcherFile = join(tmpdir(), `brain-swarm-${ts}-${agentName}.sh`);
-        writeFileSync(watcherFile, `#!/bin/bash\n${headlessCmd}\nrm -f "${promptFile}" "${watcherFile}"`, { mode: 0o755 });
-        const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-        watcher.unref();
+        const spawnResult = await spawnWithRecovery(
+          db,
+          room,
+          agentSessionId,
+          agentName,
+          agentCfg.task,
+          headlessCmd,
+          logFile,
+        );
 
-        spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
+        if (spawnResult.success) {
+          db.setSessionPid(agentSessionId, spawnResult.pid!);
+          spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
+        } else {
+          const msg = `${agentCfg.name}: spawn failed after ${spawnResult.attempt} attempts — ${spawnResult.error}`;
+          errors.push(msg);
+          db.pulse(agentSessionId, 'failed', msg);
+        }
       } catch (err: any) {
         errors.push(`${agentCfg.name}: ${err.message}`);
       }
@@ -1891,14 +2042,15 @@ server.tool(
     // Post the task to the brain for audit trail
     const taskId = db.postMessage('tasks', room, sid, sessionName, task);
 
-    // Pre-register child session
+    // Pre-register child session in 'queued' state — it transitions to 'working'
+    // only when the agent sends its first confirmed pulse via pulseWithFirstConfirm.
     db.registerSession(
       agentName,
       room,
       JSON.stringify({ parent_session_id: sid, task_id: taskId, model: model || null, headless: isHeadless, workspace: workspacePath }),
       agentSessionId,
     );
-    db.pulse(agentSessionId, 'working', 'spawned by lead; initializing');
+    db.pulse(agentSessionId, 'queued', 'spawn queued; waiting for first heartbeat');
 
     // Build env vars for the child
     const childEnvParts = [
@@ -1984,11 +2136,42 @@ fi
 `;
         writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
 
-        const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-        watcher.on('error', (err) => {
-          try { db.pulse(agentSessionId, 'failed', `headless spawn failed: ${err.message}`); } catch { /* best effort */ }
-        });
-        watcher.unref();
+        // ── Error Recovery Wrapper ─────────────────────────────────────────────
+        // Replace: detached:true, stdio:'ignore' — which silently swallows all errors
+        // With: spawnWithRecovery which provides error detection, retry w/backoff,
+        // pre-spawn checkpoint, and escalation alerts.
+        const spawnResult = await spawnWithRecovery(
+          db,
+          room,
+          agentSessionId,
+          agentName,
+          task,
+          headlessCmd,
+          logFile,
+          () => {
+            // onBeforeSpawn callback — nothing extra needed, session already registered
+          },
+        );
+
+        if (!spawnResult.success) {
+          // All retries exhausted — mark failed and return error
+          db.pulse(agentSessionId, 'failed', `Spawn exhausted (${spawnResult.attempt} attempts): ${spawnResult.error}`);
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                ok: false,
+                error: `Spawn failed after ${spawnResult.attempt} attempts: ${spawnResult.error}`,
+                agent: agentName,
+                agentSessionId,
+              }),
+            }],
+            isError: true,
+          };
+        }
+
+        // Spawn succeeded — log PID and continue
+        db.setSessionPid(agentSessionId, spawnResult.pid!);
 
         return {
           content: [{
@@ -2003,6 +2186,8 @@ fi
               workspace: workspacePath,
               isolation: isolation || 'shared',
               logFile,
+              pid: spawnResult.pid,
+              attempts: spawnResult.attempt,
               message: `Spawned "${agentName}" in headless mode (no tmux). Monitor with brain_agents. Log: ${logFile}`,
             }, null, 2),
           }],
@@ -2125,7 +2310,7 @@ rm -f "${watcherFile}"
 
       const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
       watcher.on('error', (err) => {
-        try { db.pulse(agentSessionId, 'failed', `watcher failed: ${err.message}`); } catch { /* best effort */ }
+        try { db.markDone(agentSessionId, -1, true, `watcher failed: ${err.message}`); } catch { /* best effort */ }
       });
       watcher.unref();
 

@@ -17,6 +17,7 @@ export interface Session {
   progress: string | null;
   created_at: string;
   last_heartbeat: string;
+  exit_code: number | null;
 }
 
 export interface AgentHealth {
@@ -356,6 +357,23 @@ export class BrainDB {
       CREATE INDEX IF NOT EXISTS idx_context_type ON context_ledger(room, entry_type);
       CREATE INDEX IF NOT EXISTS idx_context_file ON context_ledger(room, file_path);
       CREATE INDEX IF NOT EXISTS idx_checkpoints_room ON checkpoints(room, session_id);
+
+      CREATE TABLE IF NOT EXISTS barriers (
+        key TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        threshold INTEGER NOT NULL,
+        current INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (key, scope)
+      );
+
+      CREATE TABLE IF NOT EXISTS task_results (
+        task_id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL,
+        result TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
     `);
 
     // Add status + progress columns (safe to re-run)
@@ -368,6 +386,65 @@ export class BrainDB {
     try {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN last_seen_dm_id INTEGER NOT NULL DEFAULT 0`);
     } catch { /* column already exists */ }
+
+    // Add exit_code column to sessions
+    try { this.db.exec("ALTER TABLE sessions ADD COLUMN exit_code INTEGER"); } catch { /* already exists */ }
+  }
+
+  // ── Atomic Counters ──
+
+  incr(key: string, scope: string, delta: number = 1): { old_value: number; new_value: number } {
+    const row = this.db.prepare('SELECT value FROM state WHERE key = ? AND scope = ?').get(key, scope) as { value: string } | undefined;
+    const oldValue = row ? parseInt(row.value, 10) || 0 : 0;
+    const newValue = oldValue + delta;
+    this.db.prepare(
+      `INSERT INTO state (key, scope, value, updated_by, updated_by_name, updated_at)
+       VALUES (?, ?, ?, 'system', 'atomic-ops', datetime('now'))
+       ON CONFLICT(key, scope) DO UPDATE SET
+         value = CAST(value AS INTEGER) + ?,
+         updated_by = excluded.updated_by,
+         updated_by_name = excluded.updated_by_name,
+         updated_at = datetime('now')`
+    ).run(key, scope, String(newValue), delta);
+    return { old_value: oldValue, new_value: newValue };
+  }
+
+  decr(key: string, scope: string, delta: number = 1): { old_value: number; new_value: number } {
+    return this.incr(key, scope, -delta);
+  }
+
+  get_counter(key: string, scope: string): number {
+    const entry = this.db.prepare('SELECT value FROM state WHERE key = ? AND scope = ?').get(key, scope) as { value: string } | undefined;
+    return entry ? parseInt(entry.value, 10) || 0 : 0;
+  }
+
+  // ── Barriers ──
+
+  wait_on(key: string, scope: string, threshold: number, owner_id: string, owner_name: string): { reached: boolean; current: number; threshold: number } {
+    const existing = this.db.prepare('SELECT * FROM barriers WHERE key = ? AND scope = ?').get(key, scope) as any;
+    if (!existing) {
+      this.db.prepare('INSERT INTO barriers (key, scope, threshold, current, created_by) VALUES (?, ?, ?, 1, ?)').run(key, scope, threshold, owner_id);
+      return { reached: threshold <= 1, current: 1, threshold };
+    }
+    const newCurrent = existing.current + 1;
+    this.db.prepare('UPDATE barriers SET current = ? WHERE key = ? AND scope = ?').run(newCurrent, key, scope);
+    return { reached: newCurrent >= threshold, current: newCurrent, threshold };
+  }
+
+  get_barrier(key: string, scope: string): { key: string; scope: string; threshold: number; current: number } | null {
+    const b = this.db.prepare('SELECT * FROM barriers WHERE key = ? AND scope = ?').get(key, scope) as any;
+    return b ? { key: b.key, scope: b.scope, threshold: b.threshold, current: b.current } : null;
+  }
+
+  // ── Task Results ──
+
+  set_task_result(task_id: string, plan_id: string, result: string): void {
+    this.db.prepare('INSERT OR REPLACE INTO task_results (task_id, plan_id, result, created_at) VALUES (?, ?, ?, datetime(\'now\'))').run(task_id, plan_id, result);
+  }
+
+  get_task_result(task_id: string): string | null {
+    const r = this.db.prepare('SELECT result FROM task_results WHERE task_id = ?').get(task_id) as { result: string } | undefined;
+    return r?.result || null;
   }
 
   // ── Session Management ──
@@ -454,6 +531,10 @@ export class BrainDB {
     return this.db.prepare(
       "SELECT * FROM sessions WHERE last_heartbeat > datetime('now', '-5 minutes') ORDER BY created_at"
     ).all() as Session[];
+  }
+
+  set_exit_code(session_id: string, exit_code: number): void {
+    this.db.prepare('UPDATE sessions SET exit_code = ? WHERE id = ?').run(exit_code, session_id);
   }
 
   // ── Channel Messaging ──

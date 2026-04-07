@@ -1,0 +1,41 @@
+{
+  "task": "Upgrade brain-mcp with atomic operations, barriers, structured results, exit tracking, and separate watchdog",
+  "cwd": "/Users/devgwardo/brain-mcp",
+  "phases": [
+    {
+      "name": "phase1-db",
+      "parallel": false,
+      "agents": [
+        {
+          "name": "db-atomic",
+          "files": ["src/db.ts"]
+        }
+      ]
+    },
+    {
+      "name": "phase2-endpoints",
+      "parallel": false,
+      "agents": [
+        {
+          "name": "index-endpoints",
+          "files": ["src/index.ts"]
+        }
+      ]
+    },
+    {
+      "name": "phase3-conductor",
+      "parallel": false,
+      "agents": [
+        {
+          "name": "conductor-upgrade",
+          "files": ["src/conductor.ts"]
+        }
+      ]
+    }
+  ],
+  "gate": false,
+  "timeout": 900,
+  "max_gate_retries": 0,
+  "mode": "pi",
+  "model": "claude-sonnet-4-5"
+}

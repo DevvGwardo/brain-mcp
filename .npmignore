@@ -5,7 +5,7 @@
 !dist/
 !package.json
 !README.md
-LICENSE
+!LICENSE
 
 # Exclude dev/test stuff from dist
 dist/**/*.test.*

@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { BrainDB, type SessionStatus } from './db.js';
 import { runGateAndNotify, type GateResult } from './gate.js';
+import { runPiCoreAgent } from './pi-core-agent.js';
 
 // ── ANSI helpers ──
 
@@ -71,7 +72,7 @@ interface PhaseConfig {
   agents: AgentConfig[];
 }
 
-type AgentMode = 'claude' | 'py' | 'pi';
+type AgentMode = 'claude' | 'py' | 'pi' | 'pi-core';
 
 interface PipelineConfig {
   task: string;
@@ -80,7 +81,7 @@ interface PipelineConfig {
   gate: boolean;
   timeout: number;      // Per-agent timeout in seconds
   max_gate_retries: number;
-  mode: AgentMode;      // 'pi' = Pi coding agent, 'py' = Python agents, 'claude' = Claude Code CLI
+  mode: AgentMode;      // 'pi' = Pi CLI, 'pi-core' = pi-agent-core in-process, 'py' = Python agents, 'claude' = Claude Code CLI
   model: string;        // Model for pi/py agents
 }
 
@@ -96,7 +97,7 @@ function parseArgs(): PipelineConfig {
     const configPath = args[configIdx + 1];
     const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
     // Check for mode override flags on CLI even with --config
-    const cliMode = args.includes('--pi') ? 'pi' : args.includes('--py') ? 'py' : args.includes('--claude') ? 'claude' : null;
+    const cliMode = args.includes('--pi') ? 'pi' : args.includes('--pi-core') ? 'pi-core' : args.includes('--py') ? 'py' : args.includes('--claude') ? 'claude' : null;
     return {
       mode: cliMode || raw.mode || 'pi',
       model: raw.model || 'claude-sonnet-4-5',
@@ -135,6 +136,9 @@ function parseArgs(): PipelineConfig {
     } else if (args[i] === '--pi') {
       mode = 'pi';
       i++;
+    } else if (args[i] === '--pi-core') {
+      mode = 'pi-core';
+      i++;
     } else if (args[i] === '--py') {
       mode = 'py';
       i++;
@@ -157,15 +161,17 @@ function parseArgs(): PipelineConfig {
     console.error(`       brain-conductor --config pipeline.json`);
     console.error('');
     console.error('Options:');
-    console.error('  --agents name1 name2   Agent names to spawn (parallel by default)');
-    console.error('  --pi                   Use Pi coding agent (default — lightweight, any model)');
-    console.error('  --py                   Use raw Python agents (Anthropic API direct)');
-    console.error('  --claude               Use Claude Code CLI agents (heaviest, most capable)');
-    console.error('  --model MODEL          Model for pi/py agents (default: claude-sonnet-4-5)');
-    console.error('  --no-gate              Skip integration gate between phases');
-    console.error('  --timeout 600          Per-agent timeout in seconds (default: 600)');
-    console.error('  --retries 3            Max gate retry attempts (default: 3)');
-    console.error('  --config file.json     Load pipeline from JSON config');
+    console.error('  --pi-core         Use pi-agent-core in-process agents (fastest, no subprocess)');
+    console.error('  --pi              Use pi CLI subprocess agents');
+    console.error('  --py              Use Python subprocess agents');
+    console.error('  --claude          Use Claude Code CLI agents');
+    console.error('  --model <id>      Model ID (e.g. claude-sonnet-4-5, anthropic/claude-sonnet-4-5)');
+    console.error('  --agents <names>  Agent names for CLI mode');
+    console.error('  --no-gate         Disable the integration gate');
+    console.error('  --timeout <sec>   Per-agent timeout (default 600)');
+    console.error('  --retries <n>     Max gate retries (default 3)');
+
+    console.error('  --config file.json  Load pipeline from JSON config');
     process.exit(1);
   }
 
@@ -304,8 +310,9 @@ function spawnAgent(
 
     applyLayout(paneId, agentIndex);
 
-    // Simple timeout watcher
+    // Simple timeout watcher (records exit code on agent exit)
     const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
+    const dbPath4Watch = (process.env.BRAIN_DB_PATH || '').replace(/'/g, "'\\''");
     const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 ABSOLUTE_TIMEOUT=${config.timeout}
@@ -322,6 +329,12 @@ while true; do
   fi
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
+AGENT_EXIT_CODE=$?
+node -e "
+const { BrainDB } = require('${join(import.meta.dirname, 'db.js').replace(/'/g, "'\\''")}');
+const db = new BrainDB(process.env.BRAIN_DB_PATH || '${dbPath4Watch}');
+db.set_exit_code('${agentSessionId}', AGENT_EXIT_CODE);
+" 2>/dev/null || true
 rm -f "${watcherFile}" "${systemFile}"
 `;
     writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
@@ -348,9 +361,10 @@ rm -f "${watcherFile}" "${systemFile}"
 
     applyLayout(paneId, agentIndex);
 
-    // Simple timeout watcher
+    // Simple timeout watcher (records exit code on agent exit)
     const ts = Date.now();
     const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
+    const dbPath4Watch = (process.env.BRAIN_DB_PATH || '').replace(/'/g, "'\\''");
     const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 ABSOLUTE_TIMEOUT=${config.timeout}
@@ -367,6 +381,12 @@ while true; do
   fi
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
+AGENT_EXIT_CODE=$?
+node -e "
+const { BrainDB } = require('${join(import.meta.dirname, 'db.js').replace(/'/g, "'\\''")}');
+const db = new BrainDB(process.env.BRAIN_DB_PATH || '${dbPath4Watch}');
+db.set_exit_code('${agentSessionId}', AGENT_EXIT_CODE);
+" 2>/dev/null || true
 rm -f "${watcherFile}"
 `;
     writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
@@ -430,6 +450,7 @@ rm -f "${watcherFile}"
 
     // Watcher: wait for ready, paste prompt, wait for exit or timeout
     const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
+    const dbPath4Watch = (process.env.BRAIN_DB_PATH || '').replace(/'/g, "'\\''");
     const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 PROMPT="${promptFile}"
@@ -454,10 +475,10 @@ for i in $(seq 1 60); do
   check_timeout
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || exit 0
   CONTENT=$(tmux capture-pane -t "$TARGET" -p 2>/dev/null)
-  if echo "$CONTENT" | LC_ALL=C grep -qF $'\\xe2\\x9d\\xaf' 2>/dev/null; then
+  if echo "$CONTENT" | LC_ALL=C grep -qF $'\xe2\x9d\xaf' 2>/dev/null; then
     READY=1; break
   fi
-  if echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null; then
+  if echo "$CONTENT" | grep -q "high effort\|bypass perm\|accept edits" 2>/dev/null; then
     READY=1; break
   fi
 done
@@ -470,11 +491,18 @@ tmux send-keys -t "$TARGET" Enter
 tmux delete-buffer -b "$BUFFER" 2>/dev/null
 rm -f "$PROMPT"
 
+AGENT_EXIT_CODE=0
 while true; do
   sleep 5
   check_timeout
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
+# Record exit code
+node -e "
+const { BrainDB } = require('${join(import.meta.dirname, 'db.js').replace(/'/g, "'\\''")}');
+const db = new BrainDB(process.env.BRAIN_DB_PATH || '${dbPath4Watch}');
+db.set_exit_code('${agentSessionId}', AGENT_EXIT_CODE);
+" 2>/dev/null || true
 rm -f "${watcherFile}"
 `;
     writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
@@ -624,23 +652,96 @@ async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// ── Spawn pi-core-agent (in-process, no tmux) ──────────────────────────────
+
+async function spawnPiCoreAgent(
+  db: BrainDB,
+  config: PipelineConfig,
+  agentCfg: AgentConfig,
+  conductorId: string,
+): Promise<string> {
+  const agentSessionId = randomUUID();
+  const agentName = agentCfg.name;
+  const agentTask = agentCfg.task || config.task;
+
+  // Pre-register
+  db.registerSession(
+    agentName,
+    config.cwd,
+    JSON.stringify({ parent_session_id: conductorId, conductor: true, mode: 'pi-core' }),
+    agentSessionId,
+  );
+  db.pulse(agentSessionId, 'working', 'spawned by conductor; starting pi-core');
+
+  // Fire and forget — runPiCoreAgent handles its own exit code recording
+  runPiCoreAgent({
+    name: agentName,
+    task: agentTask,
+    db,
+    sessionId: agentSessionId,
+    room: config.cwd,
+    cwd: config.cwd,
+    model: config.model,
+    timeout: config.timeout,
+    files: agentCfg.files,
+    onEvent: (event) => {
+      // TODO: stream events to a named pipe for visibility
+      if (event.type === 'agent_end') {
+        console.error(`${C.dim}[pi-core:${agentName}] agent_end${C.reset}`);
+      }
+    },
+  }).catch((err) => {
+    console.error(`${C.red}[pi-core:${agentName}] unexpected error: ${err.message}${C.reset}`);
+    db.pulse(agentSessionId, 'failed', err.message);
+    db.set_exit_code(agentSessionId, 1);
+  });
+
+  return agentSessionId;
+}
+
+// ── Spawn persistent watchdog as detached process ──
+
+function spawnPersistentWatchdog(room: string) {
+  const watchdogPath = join(import.meta.dirname, 'watchdog.js');
+  if (!existsSync(watchdogPath)) {
+    console.error(`${C.dim}[conductor] watchdog.js not found, skipping${C.reset}`);
+    return;
+  }
+  const watchdog = spawnProcess('node', [watchdogPath], {
+    detached: true,
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      BRAIN_ROOM: room,
+      BRAIN_DB_PATH: process.env.BRAIN_DB_PATH || '',
+    },
+  });
+  watchdog.unref();
+  console.error(`${C.dim}[conductor] spawned persistent watchdog (pid ${watchdog.pid})${C.reset}`);
+}
+
 // ── Main ──
 
 async function main() {
   const config = parseArgs();
 
-  // Verify tmux
-  try {
-    execSync('tmux display-message -p ""', { stdio: 'ignore' });
-  } catch {
-    console.error(`${C.red}Error:${C.reset} Not inside a tmux session. brain-conductor requires tmux.`);
-    process.exit(1);
+  // Verify tmux — but pi-core mode doesn't need tmux since agents run in-process
+  if (config.mode !== 'pi-core') {
+    try {
+      execSync('tmux display-message -p ""', { stdio: 'ignore' });
+    } catch {
+      console.error(`${C.red}Error:${C.reset} Not inside a tmux session. brain-conductor requires tmux for ${config.mode} mode. Use --pi-core for no-tmux execution.`);
+      process.exit(1);
+    }
   }
 
   const db = new BrainDB(process.env.BRAIN_DB_PATH);
   const conductorId = randomUUID();
   db.registerSession('conductor', config.cwd, JSON.stringify({ role: 'conductor' }), conductorId);
   db.pulse(conductorId, 'working', 'orchestrating');
+
+  // Spawn persistent watchdog
+  spawnPersistentWatchdog(config.cwd);
 
   // Cleanup on exit
   function cleanup() {
@@ -653,7 +754,7 @@ async function main() {
 
   console.log(`${C.bold}${C.magenta}Brain Conductor${C.reset} starting...`);
   console.log(`${C.dim}Task: ${config.task}${C.reset}`);
-  const modeLabel = config.mode === 'pi' ? `pi (${config.model})` : config.mode === 'py' ? `py (${config.model})` : 'claude-code';
+  const modeLabel = config.mode === 'pi-core' ? `pi-core (${config.model})` : config.mode === 'pi' ? `pi (${config.model})` : config.mode === 'py' ? `py (${config.model})` : 'claude-code';
   console.log(`${C.dim}Phases: ${config.phases.length} | Mode: ${modeLabel} | Gate: ${config.gate ? 'enabled' : 'disabled'} | Timeout: ${config.timeout}s${C.reset}`);
   console.log('');
 
@@ -661,20 +762,33 @@ async function main() {
     const phase = config.phases[pi];
     const agentIds = new Map<string, string>();
 
-    // ── Spawn agents ──
-    for (let ai = 0; ai < phase.agents.length; ai++) {
-      const agentCfg = phase.agents[ai];
-
-      // Delay if specified
-      if (agentCfg.delay && agentCfg.delay > 0) {
-        await sleep(agentCfg.delay * 1000);
-      }
-
-      const sid = spawnAgent(db, config, agentCfg, conductorId, ai);
-      agentIds.set(agentCfg.name, sid);
-
-      display(config, db, pi, phase, agentIds, null, 0, 'waiting for agents...');
+    // ── Spawn agents (parallel within phase) ──
+    if (config.mode === 'pi-core') {
+      // pi-core agents run in-process — spawn all in parallel
+      const spawnPromises = phase.agents.map(async (agentCfg) => {
+        if (agentCfg.delay && agentCfg.delay > 0) {
+          await sleep(agentCfg.delay * 1000);
+        }
+        const sid = await spawnPiCoreAgent(db, config, agentCfg, conductorId);
+        agentIds.set(agentCfg.name, sid);
+      });
+      await Promise.all(spawnPromises);
+    } else {
+      // CLI-based modes (pi, py, claude) — use subprocess spawning
+      const spawnPromises = phase.agents.map((agentCfg, ai) => {
+        if (agentCfg.delay && agentCfg.delay > 0) {
+          return sleep(agentCfg.delay * 1000).then(() => {
+            const sid = spawnAgent(db, config, agentCfg, conductorId, ai);
+            agentIds.set(agentCfg.name, sid);
+          });
+        }
+        const sid = spawnAgent(db, config, agentCfg, conductorId, ai);
+        agentIds.set(agentCfg.name, sid);
+        return Promise.resolve();
+      });
+      await Promise.all(spawnPromises);
     }
+    display(config, db, pi, phase, agentIds, null, 0, 'waiting for agents...');
 
     // ── Monitor loop ──
     let gateResult: GateResult | null = null;

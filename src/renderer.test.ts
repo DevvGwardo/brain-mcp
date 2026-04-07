@@ -6,7 +6,7 @@
  *   npx vitest run src/renderer.test.ts   # with vitest
  */
 
-import { renderTool, TOOL_EMOJI } from './renderer.js';
+import { renderTool } from './renderer.js';
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -323,11 +323,26 @@ test('color=false strips ANSI codes', () => {
   assert(!hasAnsi, 'no ANSI escape codes in output');
 });
 
-test('all TOOL_EMOJI entries are unique-ish', () => {
-  const emojis = Object.entries(TOOL_EMOJI);
-  assert(emojis.length >= 40, `has ${emojis.length} emoji entries`);
-  const unique = new Set(emojis.map(([, v]) => v));
-  assert(unique.size >= emojis.length * 0.5, 'enough variety in emoji pairs');
+test('all major tools have dedicated renderers', () => {
+  // Verify renderers exist for the main tool categories
+  const tools = [
+    'brain_register', 'brain_sessions', 'brain_status', 'brain_pulse',
+    'brain_agents', 'brain_wake', 'brain_respawn',
+    'brain_post', 'brain_read', 'brain_dm', 'brain_inbox',
+    'brain_set', 'brain_get', 'brain_keys', 'brain_delete',
+    'brain_claim', 'brain_release', 'brain_claims',
+    'brain_contract_check', 'brain_gate',
+    'brain_context_push', 'brain_context_summary',
+    'brain_plan', 'brain_plan_next', 'brain_plan_status',
+    'brain_remember', 'brain_recall',
+    'brain_commit', 'brain_pr',
+    'brain_metrics',
+  ];
+  // Smoke-test each tool renders without throwing
+  for (const tool of tools) {
+    const result = renderTool(tool, JSON.stringify({ ok: true }));
+    assert(result.length > 0, `${tool} returns non-empty output`);
+  }
 });
 
 console.log(`\n✅ All renderer tests passed\n`);

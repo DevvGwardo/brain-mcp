@@ -18,13 +18,18 @@
     "postinstall": "npm rebuild"
   },
   "dependencies": {
+    "@mariozechner/pi-agent-core": "^0.65.2",
+    "@mariozechner/pi-ai": "^0.65.2",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "better-sqlite3": "^11.10.0",
     "zod": "^3.24.0"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.9.3"
   }
 }

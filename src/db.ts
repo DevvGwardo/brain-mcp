@@ -295,7 +295,9 @@ export class BrainDB {
     this._cacheStmt('SELECT * FROM messages WHERE channel = ? AND room = ? AND id > ? ORDER BY id ASC LIMIT ?');
     // claims — prune and query
     this._cacheStmt('DELETE FROM claims WHERE (expires_at IS NOT NULL AND datetime(expires_at) <= datetime(\'now\')) OR owner_id NOT IN (SELECT id FROM sessions WHERE last_heartbeat > datetime(\'now\', \'-90 seconds\'))');
-    this._cacheStmt("DELETE FROM sessions WHERE last_heartbeat < datetime('now', '-5 minutes')");
+    this._cacheStmt(
+      "DELETE FROM sessions WHERE status IN ('done', 'failed') AND last_heartbeat < datetime('now', '-5 minutes')"
+    );
     // state
     this._cacheStmt('SELECT * FROM state WHERE key = ? AND scope = ?');
     this._cacheStmt('SELECT value FROM state WHERE key = ? AND scope = ?');
@@ -724,10 +726,15 @@ export class BrainDB {
     return false;
   }
 
-  /** Remove sessions with no heartbeat for over 5 minutes and their orphaned claims. */
+  /**
+   * Remove terminal sessions with no heartbeat for over 5 minutes and their orphaned claims.
+   * In-flight sessions must remain in the DB so the watchdog can mark them failed or recover them.
+   */
   pruneStaleSessions(): number {
     const result = this.db.prepare(
-      `DELETE FROM sessions WHERE last_heartbeat < datetime('now', '-5 minutes')`
+      `DELETE FROM sessions
+       WHERE status IN ('done', 'failed')
+         AND last_heartbeat < datetime('now', '-5 minutes')`
     ).run();
     if (result.changes > 0) {
       // Clean up orphaned claims from deleted sessions

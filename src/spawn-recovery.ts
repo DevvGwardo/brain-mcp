@@ -473,7 +473,7 @@ export async function spawnWithRecovery(
     try {
       const proc = spawn('bash', [watcherFile], {
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: process.env,
       });
 

@@ -116,12 +116,14 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
 
           const taskId = db.postMessage('tasks', room, sid, sessionName, agentCfg.task);
 
+          // Keep new sessions queued until the child sends its first confirmed heartbeat.
+          // This prevents ghost agents from appearing healthy when spawn dies immediately.
           db.registerSession(
             agentName, room,
             JSON.stringify({ parent_session_id: sid, task_id: taskId, swarm: true, workspace: workspacePath }),
             agentSessionId,
           );
-          db.pulse(agentSessionId, 'working', 'spawned by swarm; initializing');
+          db.pulse(agentSessionId, 'queued', `swarm queued; depends_on=${JSON.stringify(agentCfg.depends_on)}`);
 
           const childEnvParts = [
             process.env.BRAIN_DB_PATH ? `BRAIN_DB_PATH=${sh(process.env.BRAIN_DB_PATH)}` : null,
@@ -168,6 +170,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           );
 
           if (result.success) {
+            db.setSessionPid(agentSessionId, result.pid!);
             spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
           } else {
             db.pulse(agentSessionId, 'failed', `spawn recovery exhausted: ${result.error}`);
@@ -252,12 +255,13 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
 
       const taskId = db.postMessage('tasks', room, sid, sessionName, task);
 
+      // Keep the child queued until it proves it is alive with a real heartbeat.
       db.registerSession(
         agentName, room,
         JSON.stringify({ parent_session_id: sid, task_id: taskId, model: model || null, headless: isHeadless, workspace: workspacePath }),
         agentSessionId,
       );
-      db.pulse(agentSessionId, 'working', 'spawned by lead; initializing');
+      db.pulse(agentSessionId, 'queued', 'spawn queued; waiting for first heartbeat');
 
       const childEnvParts = [
         process.env.BRAIN_DB_PATH ? `BRAIN_DB_PATH=${sh(process.env.BRAIN_DB_PATH)}` : null,
@@ -314,6 +318,8 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
               isError: true,
             };
           }
+
+          db.setSessionPid(agentSessionId, result.pid!);
 
           return {
             content: [{
@@ -461,10 +467,10 @@ rm -f "${watcherFile}"
               model: model || 'default',
               workspace: workspacePath,
               isolation: isolation || 'shared',
-              message: `Spawned "${agentName}" — ${layoutDesc[spawnLayout]}. Pre-registered with heartbeat. Lead watchdog active.`,
-            }, null, 2),
-          }],
-        };
+                message: `Spawned "${agentName}" — ${layoutDesc[spawnLayout]}. Session is queued until the first heartbeat. Lead watchdog active.`,
+              }, null, 2),
+            }],
+          };
       } catch (err: any) {
         try {
           db.pulse(agentSessionId, 'failed', `spawn error: ${err.message || String(err)}`);

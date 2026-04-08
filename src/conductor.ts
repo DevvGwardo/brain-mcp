@@ -64,6 +64,7 @@ const AGENT_COLORS = [
 interface AgentConfig {
   name: string;
   task?: string;       // Override task per agent
+  model?: string;      // Per-agent model override
   files?: string[];    // Files this agent is responsible for
   delay?: number;      // Seconds to wait before spawning
   role?: string;
@@ -259,6 +260,7 @@ function spawnAgent(
   const agentSessionId = randomUUID();
   const agentName = agent.name;
   const agentTask = agent.task || config.task;
+  const agentModel = agent.model || config.model;
   const tmuxName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
   const workspaceCwd = agent.workspace || config.cwd;
 
@@ -266,7 +268,7 @@ function spawnAgent(
   db.registerSession(
     agentName,
     config.cwd,
-    JSON.stringify({ parent_session_id: conductorId, conductor: true, mode: config.mode }),
+    JSON.stringify({ parent_session_id: conductorId, conductor: true, mode: config.mode, model: agentModel }),
     agentSessionId,
   );
 
@@ -320,7 +322,7 @@ function spawnAgent(
     writeFileSync(systemFile, brainPrompt);
 
     // Resolve model — for direct anthropic provider, use model names like claude-sonnet-4-5
-    const piModel = config.model || 'claude-sonnet-4-5';
+    const piModel = agentModel || 'claude-sonnet-4-5';
     // Determine provider from model name
     const piProvider = piModel.includes('/') ? piModel.split('/')[0] : 'anthropic';
     const piModelId = piModel.includes('/') ? piModel : piModel;
@@ -390,7 +392,7 @@ rm -f "${watcherFile}" "${systemFile}"
   } else if (config.mode === 'py') {
     // ── Python agent mode ──
     envParts.push(`BRAIN_TASK=${sh(agentTask)}`);
-    envParts.push(`BRAIN_MODEL=${sh(config.model)}`);
+    envParts.push(`BRAIN_MODEL=${sh(agentModel)}`);
     if (process.env.ANTHROPIC_API_KEY) {
       envParts.push(`ANTHROPIC_API_KEY=${sh(process.env.ANTHROPIC_API_KEY)}`);
     }
@@ -442,7 +444,8 @@ rm -f "${watcherFile}"
   } else {
     // ── Claude Code mode (original) ──
     const childEnv = envParts.join(' ');
-    const claudeCmd = `cd ${sh(workspaceCwd)} && env ${childEnv} claude --dangerously-skip-permissions`;
+    const modelFlag = agentModel ? ` --model ${sh(agentModel)}` : '';
+    const claudeCmd = `cd ${sh(workspaceCwd)} && env ${childEnv} claude${modelFlag} --dangerously-skip-permissions`;
 
     // Build prompt
     const fileScope = agent.files?.length
@@ -722,6 +725,7 @@ async function spawnPiCoreAgent(
   const agentSessionId = randomUUID();
   const agentName = agentCfg.name;
   const agentTask = agentCfg.task || config.task;
+  const agentModel = agentCfg.model || config.model;
   const workspaceCwd = agentCfg.workspace || config.cwd;
 
   // Create abort controller for this agent
@@ -731,7 +735,7 @@ async function spawnPiCoreAgent(
   db.registerSession(
     agentName,
     config.cwd,
-    JSON.stringify({ parent_session_id: conductorId, conductor: true, mode: 'pi-core' }),
+    JSON.stringify({ parent_session_id: conductorId, conductor: true, mode: 'pi-core', model: agentModel }),
     agentSessionId,
   );
   db.pulse(agentSessionId, 'working', 'spawned by conductor; starting pi-core');
@@ -741,7 +745,7 @@ async function spawnPiCoreAgent(
     sessionId: agentSessionId,
     name: agentName,
     abortController,
-    model: config.model,
+    model: agentModel,
     startedAt: Date.now(),
   });
 
@@ -753,7 +757,7 @@ async function spawnPiCoreAgent(
     sessionId: agentSessionId,
     room: config.cwd,
     cwd: workspaceCwd,
-    model: config.model,
+    model: agentModel,
     timeout: config.timeout,
     files: agentCfg.files,
     role: agentCfg.role,
@@ -868,9 +872,13 @@ async function main() {
   console.log(`${C.dim}Phases: ${config.phases.length} | Mode: ${modeLabel}${thinkingLabel} | Gate: ${config.gate ? 'enabled' : 'disabled'} | Timeout: ${config.timeout}s${C.reset}`);
   console.log('');
 
+  let pipelineFailed = false;
+  let pipelineFailureReason = '';
+
   for (let pi = 0; pi < config.phases.length; pi++) {
     const phase = config.phases[pi];
     const agentIds = new Map<string, string>();
+    let phaseFailed = false;
 
     // ── Spawn agents (parallel within phase) ──
     if (config.mode === 'pi-core') {
@@ -917,6 +925,8 @@ async function main() {
       if (failed.length > 0) {
         display(config, db, pi, phase, agentIds, gateResult, gateAttempt, `FAILED: ${failed.join(', ')}`);
         console.log(`\n${C.red}Phase "${phase.name}" failed.${C.reset} Agents that failed: ${failed.join(', ')}`);
+        phaseFailed = true;
+        pipelineFailureReason = `phase "${phase.name}" failed: ${failed.join(', ')}`;
         break;
       }
 
@@ -943,6 +953,8 @@ async function main() {
               console.log(`    ${err}`);
             }
           }
+          phaseFailed = true;
+          pipelineFailureReason = `phase "${phase.name}" gate failed after ${gateAttempt} attempts`;
           break;
         }
 
@@ -983,6 +995,12 @@ async function main() {
         break;
       }
     }
+
+    if (phaseFailed) {
+      pipelineFailed = true;
+      console.log(`${C.red}Aborting remaining phases after failure in "${phase.name}".${C.reset}`);
+      break;
+    }
   }
 
   // ── Final summary ──
@@ -1003,11 +1021,21 @@ async function main() {
   for (const agent of allAgents) {
     if (agent.name === 'conductor') continue;
     try {
+      const session = db.getSession(agent.id);
+      let metricModel = config.model;
+      if (session?.metadata) {
+        try {
+          const metadata = JSON.parse(session.metadata);
+          if (typeof metadata.model === 'string' && metadata.model.trim()) {
+            metricModel = metadata.model.trim();
+          }
+        } catch { /* ignore invalid metadata */ }
+      }
       const durationSec = agent.heartbeat_age_seconds != null
         ? Math.max(0, (Date.now() / 1000) - (Date.now() / 1000 - agent.heartbeat_age_seconds))
         : undefined;
       db.recordMetric(config.cwd, agent.name, agent.id, {
-        model: config.model,
+        model: metricModel,
         task_description: config.task,
         duration_seconds: durationSec,
         gate_passes: config.gate ? config.max_gate_retries : 0,
@@ -1028,6 +1056,11 @@ async function main() {
 
   if (failed.length === 0 && mismatches.length === 0) {
     console.log(`\n${C.green}${C.bold}All phases passed. Ship it.${C.reset}`);
+  }
+
+  if (pipelineFailed) {
+    db.pulse(conductorId, 'failed', pipelineFailureReason || 'pipeline failed');
+    process.exit(1);
   }
 
   db.pulse(conductorId, 'done', 'all phases complete');

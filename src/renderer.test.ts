@@ -74,6 +74,73 @@ test('brain_agents compact mode', () => {
   assert(result.includes('3 agents'), 'compact: shows count');
 });
 
+test('brain_agents full renderer shows boxes with claims', () => {
+  const result = renderTool('brain_agents', JSON.stringify({
+    total: 2, working: 1, done: 0, failed: 0, stale: 0,
+    agents: [
+      {
+        name: 'alpha', status: 'working', heartbeat_age_seconds: 5,
+        progress: 'editing src/api.ts',
+        claims: ['src/api.ts', 'src/types.ts'],
+        is_stale: false,
+      },
+      {
+        name: 'beta', status: 'idle', heartbeat_age_seconds: 3,
+        progress: null,
+        claims: [],
+        is_stale: false,
+      },
+    ],
+  }));
+
+  const clean = stripAnsi(result);
+  assert(clean.includes('2 agents'), 'shows agent count');
+  assert(clean.includes('alpha'), 'shows first agent name');
+  assert(clean.includes('beta'), 'shows second agent name');
+  assert(clean.includes('2 claims'), 'shows correct claims count for alpha');
+  assert(clean.includes('0 claims'), 'shows 0 claims for beta');
+  assert(clean.includes('editing src/api.ts'), 'shows progress');
+  assert(clean.includes('No progress reported'), 'shows no progress');
+  assert(clean.includes('WORKING'), 'shows working status');
+  assert(clean.includes('IDLE'), 'shows idle status');
+  assert(clean.includes('┌'), 'renders box borders');
+});
+
+test('brain_agents renderer handles held_claims fallback', () => {
+  // Some callers might send held_claims instead of claims
+  const result = renderTool('brain_agents', JSON.stringify({
+    total: 1, working: 0, done: 0, failed: 0, stale: 0,
+    agents: [
+      {
+        name: 'worker', status: 'idle', heartbeat_age_seconds: 10,
+        held_claims: ['src/main.ts'],
+        is_stale: false,
+      },
+    ],
+  }));
+
+  const clean = stripAnsi(result);
+  assert(clean.includes('1 claim'), 'shows 1 claim (singular) from held_claims');
+});
+
+test('brain_agents shows STALE label for stale agents', () => {
+  const result = renderTool('brain_agents', JSON.stringify({
+    total: 1, working: 0, done: 0, failed: 0, stale: 1,
+    agents: [
+      {
+        name: 'dead-agent', status: 'idle', heartbeat_age_seconds: 120,
+        progress: 'last seen 2m ago',
+        claims: [],
+        is_stale: true,
+      },
+    ],
+  }));
+
+  const clean = stripAnsi(result);
+  assert(clean.includes('STALE'), 'shows STALE label');
+  assert(clean.includes('2m ago'), 'shows minutes for stale agent');
+});
+
 test('brain_wake shows agent details', () => {
   const result = renderTool('brain_wake', JSON.stringify({
     ok: true,

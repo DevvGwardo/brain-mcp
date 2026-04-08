@@ -52,7 +52,7 @@ const failureRecords = new Map<string, SpawnFailureRecord>();
 // ── Error Detection ───────────────────────────────────────────────────────────
 
 export interface SpawnError {
-  code: 'ENOENT' | 'EACCES' | 'EINVALID' | 'ETIMEDOUT' | 'ECLI_ERROR' | 'UNKNOWN';
+  code: 'ENOENT' | 'EACCES' | 'EINVALID' | 'ETIMEDOUT' | 'ECLI_ERROR' | 'EAUTH' | 'UNKNOWN';
   message: string;
   recoverable: boolean; // true = worth retrying, false = permanent failure
 }
@@ -96,6 +96,52 @@ export function classifyError(err: NodeJS.ErrnoException): SpawnError {
   return {
     code: 'UNKNOWN',
     message: msg,
+    recoverable: true,
+  };
+}
+
+/**
+ * Classify early process failures captured from the spawned CLI's output.
+ * This catches permanent auth/config problems that should not be retried.
+ */
+export function classifyProcessFailure(error?: string, exitCode?: number): SpawnError {
+  const msg = (error || '').trim();
+
+  if (/codex token refresh failed with status\s+401/i.test(msg)) {
+    return {
+      code: 'EAUTH',
+      message: `Codex authentication failed (401). Run \`codex login\` and retry. Last output: ${msg}`,
+      recoverable: false,
+    };
+  }
+
+  if (/(authentication failed|not logged in|login required|invalid refresh token|unauthorized)/i.test(msg)) {
+    return {
+      code: 'EAUTH',
+      message: `CLI authentication failed. Refresh credentials and retry. Last output: ${msg}`,
+      recoverable: false,
+    };
+  }
+
+  if (/\bcommand not found\b|not found:|no such file/i.test(msg)) {
+    return {
+      code: 'ENOENT',
+      message: msg || `process exited with code ${exitCode ?? -1}`,
+      recoverable: false,
+    };
+  }
+
+  if (/permission denied/i.test(msg)) {
+    return {
+      code: 'EACCES',
+      message: msg,
+      recoverable: false,
+    };
+  }
+
+  return {
+    code: 'ECLI_ERROR',
+    message: msg || `process exited with code ${exitCode ?? -1}`,
     recoverable: true,
   };
 }
@@ -386,6 +432,11 @@ function waitForStartup(
 
     const onExit = (code: number | null) => {
       earlyExitCode = code ?? -1;
+      if (earlyExitCode === 0) {
+        // Process completed successfully before startup grace — fast-completing agent
+        finish({ started: true });
+        return;
+      }
       const failure = readFailureDetails(logFile, exitCodeFile);
       finish({
         started: false,
@@ -491,7 +542,21 @@ export async function spawnWithRecovery(
       }
 
       const errMsg = startup.error ?? `exited with code ${startup.exitCode ?? -1}`;
-      recordSpawnFailure(record, attempt, errMsg, startup.exitCode);
+      const classified = classifyProcessFailure(errMsg, startup.exitCode);
+      recordSpawnFailure(record, attempt, classified.message, startup.exitCode);
+
+      if (!classified.recoverable) {
+        try { unlinkSync(watcherFile); } catch { /* best effort */ }
+        try { unlinkSync(pidFile); } catch { /* best effort */ }
+        try { unlinkSync(exitCodeFile); } catch { /* best effort */ }
+        return {
+          success: false,
+          error: classified.message,
+          attempt,
+          exitCode: startup.exitCode,
+          recoveryContext: recoveryCtx,
+        };
+      }
 
       // Post alert if escalating
       if (shouldEscalate(record)) {

@@ -578,9 +578,10 @@ export class BrainDB {
     return this.incr(key, scope, -delta);
   }
 
-  get_counter(key: string, scope: string): number {
+  get_counter(key: string, scope: string): { value: number; found: boolean } {
     const entry = this.db.prepare('SELECT value FROM state WHERE key = ? AND scope = ?').get(key, scope) as { value: string } | undefined;
-    return entry ? parseInt(entry.value, 10) || 0 : 0;
+    if (!entry) return { value: 0, found: false };
+    return { value: parseInt(entry.value, 10) || 0, found: true };
   }
 
   // ── Barriers ──

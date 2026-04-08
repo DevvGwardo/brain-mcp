@@ -41,6 +41,14 @@ export async function startHttpServer(
   const app = createApp({ host });
   const sessions = new Map<string, HttpSession>();
 
+  // ── CORS middleware ─────────────────────────────────────────────────────
+
+  app.use((_req: any, res: any, next: () => void) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
+    next();
+  });
+
   // ── MCP Streamable HTTP endpoint ────────────────────────────────────────
 
   app.post('/mcp', async (req: any, res: any) => {
@@ -181,9 +189,7 @@ export async function startHttpServer(
 
   app.get('/health', (_req: any, res: any) => {
     res.json({
-      ok: true,
-      sessions: sessions.size,
-      room,
+      status: 'ok',
       uptime: Math.round(process.uptime()),
     });
   });

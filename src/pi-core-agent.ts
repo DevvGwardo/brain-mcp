@@ -12,8 +12,8 @@
 
 import { Agent } from '@mariozechner/pi-agent-core';
 import { getModel } from '@mariozechner/pi-ai';
-import type { Model } from '@mariozechner/pi-ai';
-import type { AgentEvent } from '@mariozechner/pi-agent-core';
+import type { Model, ThinkingBudgets } from '@mariozechner/pi-ai';
+import type { AgentEvent, ThinkingLevel } from '@mariozechner/pi-agent-core';
 import { BrainDB } from './db.js';
 import { createBrainTools } from './pi-core-tools.js';
 
@@ -30,6 +30,8 @@ export interface PiCoreAgentConfig {
   role?: string;
   acceptance?: string[];
   dependsOn?: string[];
+  thinkingLevel?: ThinkingLevel;
+  thinkingBudgets?: ThinkingBudgets;
   onEvent?: (event: AgentEvent) => void;
   abortSignal?: AbortSignal;
 }
@@ -86,9 +88,16 @@ export async function runPiCoreAgent(config: PiCoreAgentConfig): Promise<{ exitC
         taskDirective,
       ].join('\n'),
       model: resolvedModel,
+      thinkingLevel: config.thinkingLevel ?? 'medium',
       tools: brainTools,
     },
     toolExecution: 'parallel',
+    thinkingBudgets: config.thinkingBudgets ?? {
+      minimal: 1024,
+      low: 4096,
+      medium: 8192,
+      high: 16384,
+    },
     // getApiKey: forward API keys for all supported providers
     getApiKey: (provider: string) => {
       const keys: Record<string, string | undefined> = {
@@ -119,9 +128,40 @@ export async function runPiCoreAgent(config: PiCoreAgentConfig): Promise<{ exitC
     },
   });
 
+  // Wire abortSignal to agent
+  if (config.abortSignal) {
+    config.abortSignal.addEventListener('abort', () => {
+      console.error(`[pi-core:${config.name}] abort signal received`);
+      agent.abort();
+    }, { once: true });
+  }
+
   // Subscribe to events for visibility
   if (config.onEvent) {
-    agent.subscribe(config.onEvent);
+    agent.subscribe(async (event) => {
+      switch (event.type) {
+        case 'agent_start':
+          console.error(`[pi-core:${config.name}] agent_start — thinking=${config.thinkingLevel ?? 'medium'}`);
+          config.db.pulse(config.sessionId, 'working', 'agent started');
+          break;
+        case 'turn_start':
+          config.db.pulse(config.sessionId, 'working', 'thinking...');
+          break;
+        case 'turn_end':
+          if (event.toolResults.length > 0) {
+            const toolNames = event.toolResults.map(r => r.toolName).join(', ');
+            config.db.pulse(config.sessionId, 'working', `${event.toolResults.length} tool(s): ${toolNames}`);
+          }
+          break;
+        case 'tool_execution_start':
+          config.db.pulse(config.sessionId, 'working', `executing tool:${event.toolName}`);
+          break;
+        case 'agent_end':
+          console.error(`[pi-core:${config.name}] agent_end — ${event.messages.length} messages in transcript`);
+          break;
+      }
+      config.onEvent?.(event);
+    });
   }
 
   // Set up timeout

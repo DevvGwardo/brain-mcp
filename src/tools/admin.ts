@@ -98,8 +98,8 @@ export function registerAdminTools(
       ensureSession();
       const s = scope || room;
       try {
-        const value = db.get_counter(key, s);
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ key, scope: s, value }) }] };
+        const counter = db.get_counter(key, s);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ key, scope: s, value: counter.value, found: counter.found }) }] };
       } catch (e: any) {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ error: e.message }) }] };
       }

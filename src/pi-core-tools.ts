@@ -167,8 +167,8 @@ export function createBrainTools(
       execute: async (toolCallId, { key, scope }) => {
         try {
           const s = scope || room;
-          const value = db.get_counter(key, s);
-          return ok({ key, scope: s, value });
+          const counter = db.get_counter(key, s);
+          return ok({ key, scope: s, value: counter.value, found: counter.found });
         } catch (e: any) {
           return err(`counter failed: ${e.message}`);
         }

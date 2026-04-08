@@ -46,6 +46,8 @@ export interface ConductorAgentConfig {
   acceptance?: string[];
   depends_on?: string[];
   workspace?: string;
+  thinking_level?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  thinking_budgets?: { minimal?: number; low?: number; medium?: number; high?: number };
 }
 
 export interface ConductorPhaseConfig {
@@ -62,6 +64,8 @@ export interface WorkflowConductorConfig {
   max_gate_retries: number;
   mode: WorkflowMode;
   model?: string;
+  thinking_level?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  thinking_budgets?: { minimal?: number; low?: number; medium?: number; high?: number };
   phases: ConductorPhaseConfig[];
 }
 
@@ -85,6 +89,7 @@ export interface WorkflowCompileOptions {
   available_models?: string[];
   focus_files?: string[];
   recommendModel?: (task: string, role: string) => ModelSuggestion | undefined;
+  thinkingLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 }
 
 interface DomainBlueprint {
@@ -474,6 +479,7 @@ export function compileWorkflow(goal: string, options: WorkflowCompileOptions = 
       max_gate_retries: gateRetriesFor(kind),
       mode: options.mode || 'pi-core',
       model: undefined,
+      thinking_level: options.thinkingLevel ?? 'medium',
       phases: conductorPhases,
     },
     suggested_layout: 'headless',

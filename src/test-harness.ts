@@ -108,7 +108,7 @@ const PHASES: Record<number, {
       },
       {
         name: 'counter is 3 (incr(5) then decr(2))',
-        check: (db) => db.get_counter('p1_counter', room) === 3,
+        check: (db) => db.get_counter('p1_counter', room).value === 3,
         detail: 'counter should be 3 after agent-a incr(5) and agent-b decr(2)',
       },
       {
@@ -345,7 +345,7 @@ const PHASES: Record<number, {
     assertions: (room) => [
       {
         name: 'counter is 5',
-        check: (db) => db.get_counter('p6_counter', room) === 5,
+        check: (db) => db.get_counter('p6_counter', room).value === 5,
         detail: 'counter should be 5 after 5 incr(delta=1)',
       },
       {

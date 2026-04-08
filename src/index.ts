@@ -39,16 +39,20 @@ const cBool = () => z.preprocess(
 );
 const cArr = <T extends z.ZodTypeAny>(item: T) => z.preprocess(
   (v) => {
-    if (typeof v !== 'string') return v;
-    try {
-      const parsed = JSON.parse(v);
-      return Array.isArray(parsed) ? parsed : v;
-    } catch {
-      return v;
+    if (typeof v === 'string') {
+      try {
+        const parsed = JSON.parse(v);
+        return Array.isArray(parsed) ? parsed : v;
+      } catch {
+        return v;
+      }
     }
+    return v;
   },
   z.array(item),
 );
+
+const THINKING_LEVEL_SCHEMA = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional().describe('Reasoning/thinking level for pi-core agents. Default: medium.');
 
 // ── Initialize ──
 
@@ -145,6 +149,7 @@ function compileWorkflowForRoom(
     available_models?: string[];
     focus_files?: string[];
     auto_route_models?: boolean;
+    thinking_level?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   } = {},
 ) {
   const router = new TaskRouter(db, room);
@@ -163,6 +168,7 @@ function compileWorkflowForRoom(
           reasoning: `[${role}] ${rec.reasoning}`,
         };
       },
+    thinkingLevel: options.thinking_level,
   });
 }
 
@@ -197,6 +203,29 @@ function prepareAgentWorkspace(baseCwd: string, agentName: string, isolation: Is
   }
 
   return workspacePath;
+}
+
+function insideTmuxSession(): boolean {
+  try {
+    execSync('tmux display-message -p ""', { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function createDetachedTmuxSession(baseName: string, windowName = 'brain'): {
+  sessionName: string;
+  windowTarget: string;
+  attachCommand: string;
+} {
+  const sessionName = `brain-${sanitizeName(baseName)}-${Date.now().toString().slice(-6)}`;
+  execSync(`tmux new-session -d -s ${sh(sessionName)} -n ${sh(windowName)}`);
+  return {
+    sessionName,
+    windowTarget: `${sessionName}:0`,
+    attachCommand: `tmux attach -t ${sessionName}`,
+  };
 }
 
 function persistCompiledWorkflow(
@@ -389,7 +418,12 @@ HERMES/MINIMAX TOOL-NAMING RULE:
 - Do NOT prepend "brain_" yourself when calling tools through Hermes. Hermes/MCP adds server namespacing automatically.
 - If the client shows names like mcp_brain_status or mcp_brain_get, use those exact names from the picker instead of inventing brain_brain_* forms.
 
-IMPORTANT: Do NOT fall back to the built-in Agent tool when the user asks for parallel agents or wake/swarm. Use these brain tools instead — they spawn visible, independent sessions that the user can watch.
+IMPORTANT: When the user asks for parallel agents, visible agent windows, tmux panes, wake, swarm, tmux_wake, or tmux_swarm:
+- MUST call this MCP server's wake/swarm tools directly.
+- MUST NOT use the client's built-in Agent/delegate/background-agent feature.
+- MUST NOT summarize what would happen instead of calling the tool.
+- The whole point of wake/swarm is to spawn real external CLI sessions the user can watch in tmux.
+- If the user asks for new Claude Code sessions specifically, prefer the explicit aliases claude_code_wake / claude_code_swarm.
 
 SIMPLIFIED INTERFACE: The "control" meta-tool wraps all coordination into one tool call with an action parameter.
 Spawned agents should use control(action=...) instead of individual tools. It handles heartbeats, file locking, and checkpoints automatically.`,
@@ -404,9 +438,14 @@ const rawTool = server.tool.bind(server);
 const exposeLegacyAliases =
   process.env.BRAIN_LEGACY_ALIASES === '1' ||
   process.env.BRAIN_LEGACY_ALIASES === 'true';
+const explicitToolAliases: Record<string, string[]> = {
+  wake: ['tmux_wake', 'brain_wake', 'claude_code_wake', 'claude_session_wake'],
+  swarm: ['tmux_swarm', 'brain_swarm', 'claude_code_swarm', 'claude_session_swarm'],
+};
 const _registeredTools = new Set<string>();
 (server as any).tool = ((name: string, ...args: any[]) => {
   const brainName = name.startsWith('brain_') ? name : `brain_${name}`;
+  const aliases = explicitToolAliases[name] || [];
   if (
     exposeLegacyAliases &&
     !name.startsWith('brain_') &&
@@ -414,6 +453,12 @@ const _registeredTools = new Set<string>();
     !_registeredTools.has(brainName)
   ) {
     (rawTool as any)(brainName, ...args);
+  }
+  for (const alias of aliases) {
+    if (!_registeredTools.has(alias)) {
+      (rawTool as any)(alias, ...args);
+      _registeredTools.add(alias);
+    }
   }
   _registeredTools.add(name);
   if (exposeLegacyAliases && !name.startsWith('brain_') && name !== 'control') {
@@ -821,8 +866,8 @@ server.tool(
     ensureSession();
     const s = scope || room;
     try {
-      const value = db.get_counter(key, s);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ key, scope: s, value }) }] };
+      const counter = db.get_counter(key, s);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ key, scope: s, value: counter.value, found: counter.found }) }] };
     } catch (e: any) {
       return { content: [{ type: 'text' as const, text: JSON.stringify({ error: e.message }) }] };
     }
@@ -1222,10 +1267,23 @@ Returns your last known state: current task, files touched, decisions made, prog
 
 server.tool(
   'swarm',
-  `Spawn multiple agents at once to work on a task in parallel. This is the high-level
-orchestration tool — one call replaces multiple brain_wake calls.
+  `Spawn multiple external agent sessions at once to work on a task in parallel.
+THIS TOOL EXISTS TO CREATE REAL, WATCHABLE CLI SESSIONS.
+
+CRITICAL CLIENT RULES:
+- Call this tool directly when the user asks for multiple agents, tmux panes, visible sessions, or live watching.
+- Do NOT use the client's built-in Agent/delegate/background-agent feature instead.
+- Do NOT silently replace this with any internal orchestration.
+
+Behavior:
+- layout="headless": background CLI processes
+- layout="horizontal" or "tiled": visible tmux panes in the current tmux session
+- if not already in tmux and a visible layout is requested, this tool creates a detached tmux session and returns attachCommand
+
 Automatically: registers as lead, creates a task plan, spawns all agents, starts watchdog.
-Use brain_agents to monitor, brain_auto_gate when done.`,
+Use brain_agents to monitor, brain_auto_gate when done.
+
+MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_code_swarm", or "claude_session_swarm", use this tool.`,
   {
     task: z.string().describe('The overall task to accomplish'),
     agents: cArr(z.object({
@@ -1246,14 +1304,13 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
     const sid = ensureSession();
     startLeadWatchdog(sid);
 
-    let spawnLayout = layout || 'headless';
-    if (spawnLayout !== 'headless') {
-      try {
-        execSync('tmux display-message -p ""', { stdio: 'ignore' });
-      } catch {
-        spawnLayout = 'headless';
-      }
-    }
+    const requestedLayout = layout || 'headless';
+    const spawnLayout = requestedLayout;
+    const useVisibleTmux = spawnLayout !== 'headless';
+    const inTmux = useVisibleTmux ? insideTmuxSession() : false;
+    const detachedTmux = useVisibleTmux && !inTmux
+      ? createDetachedTmuxSession(`swarm-${roomLabel}`, 'swarm')
+      : null;
     const cliBase = process.env.BRAIN_DEFAULT_CLI || 'claude';
 
     // Store shared context
@@ -1308,42 +1365,157 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           workspacePath,
         });
 
-        // Spawn headless
         const childEnv = childEnvParts.join(' ');
         const logFile = join(tmpdir(), `brain-agent-${agentSessionId}.log`);
         const ts = Date.now();
         const promptFile = join(tmpdir(), `brain-prompt-${ts}-${agentName}.txt`);
         writeFileSync(promptFile, prompt);
 
-        let headlessCmd: string;
+        if (!useVisibleTmux) {
+          let headlessCmd: string;
+          if (cliType === 'claude') {
+            const modelFlag = agentModel ? ` --model ${sh(agentModel)}` : '';
+            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} claude -p${modelFlag} --dangerously-skip-permissions < ${sh(promptFile)} > ${sh(logFile)} 2>&1`;
+          } else if (cliType === 'hermes') {
+            const hermesModelEnv = agentModel ? `HERMES_MODEL=${sh(agentModel)}` : '';
+            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
+          } else {
+            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
+          }
+
+          const spawnResult = await spawnWithRecovery(
+            db,
+            room,
+            agentSessionId,
+            agentName,
+            agentCfg.task,
+            headlessCmd,
+            logFile,
+          );
+
+          if (spawnResult.success) {
+            db.setSessionPid(agentSessionId, spawnResult.pid!);
+            spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
+          } else {
+            const msg = `${agentCfg.name}: spawn failed after ${spawnResult.attempt} attempts — ${spawnResult.error}`;
+            errors.push(msg);
+            db.pulse(agentSessionId, 'failed', msg);
+          }
+          continue;
+        }
+
+        let tmuxCmd: string;
         if (cliType === 'claude') {
           const modelFlag = agentModel ? ` --model ${sh(agentModel)}` : '';
-          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} claude -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
+          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} claude${modelFlag} --dangerously-skip-permissions`;
         } else if (cliType === 'hermes') {
           const hermesModelEnv = agentModel ? `HERMES_MODEL=${sh(agentModel)}` : '';
-          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
+          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes`;
         } else {
-          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
+          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}`;
         }
 
-        const spawnResult = await spawnWithRecovery(
-          db,
-          room,
-          agentSessionId,
-          agentName,
-          agentCfg.task,
-          headlessCmd,
-          logFile,
-        );
-
-        if (spawnResult.success) {
-          db.setSessionPid(agentSessionId, spawnResult.pid!);
-          spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
+        let target: string;
+        if (detachedTmux && spawned.length === 0) {
+          execSync(`tmux rename-window -t ${sh(detachedTmux.windowTarget)} ${sh(agentName)}`);
+          execSync(`tmux respawn-pane -k -t ${sh(`${detachedTmux.windowTarget}.0`)} ${sh(tmuxCmd)}`);
+          target = execSync(`tmux display-message -p -t ${sh(`${detachedTmux.windowTarget}.0`)} '#{pane_id}'`).toString().trim();
+        } else if (detachedTmux) {
+          target = execSync(
+            `tmux split-window -h -t ${sh(detachedTmux.windowTarget)} -P -F '#{pane_id}' ${sh(tmuxCmd)}`
+          ).toString().trim();
         } else {
-          const msg = `${agentCfg.name}: spawn failed after ${spawnResult.attempt} attempts — ${spawnResult.error}`;
-          errors.push(msg);
-          db.pulse(agentSessionId, 'failed', msg);
+          target = execSync(
+            `tmux split-window -h -P -F '#{pane_id}' ${sh(tmuxCmd)}`
+          ).toString().trim();
         }
+
+        try {
+          const layoutTarget = detachedTmux?.windowTarget;
+          let paneCount = 2;
+          if (layoutTarget) {
+            try { paneCount = parseInt(execSync(`tmux list-panes -t ${sh(layoutTarget)} | wc -l`).toString().trim(), 10) || 2; } catch { /* default */ }
+          } else {
+            try { paneCount = parseInt(execSync('tmux list-panes | wc -l').toString().trim(), 10) || 2; } catch { /* default */ }
+          }
+          const layoutPrefix = layoutTarget ? `tmux select-layout -t ${sh(layoutTarget)}` : 'tmux select-layout';
+
+          if (spawnLayout === 'tiled' || paneCount > 4) {
+            execSync(`${layoutPrefix} tiled`);
+          } else if (paneCount <= 2) {
+            execSync(`${layoutPrefix} even-horizontal`);
+          } else {
+            execSync(`${layoutPrefix} main-vertical`);
+            if (!layoutTarget) {
+              try { execSync('tmux resize-pane -t "{top-left}" -x 40%'); } catch { /* older tmux */ }
+            }
+          }
+          if (!layoutTarget) {
+            try { execSync('tmux select-layout -E'); } catch { /* tmux 3.1+ */ }
+          }
+        } catch { /* layout may vary */ }
+
+        const exitCmd = cliType === 'hermes' ? '/quit' : '/exit';
+        const readyPatterns = cliType === 'hermes'
+          ? `echo "$CONTENT" | grep -q "hermes\\|>>\\|❯" 2>/dev/null`
+          : `echo "$CONTENT" | LC_ALL=C grep -qF $'\\xe2\\x9d\\xaf' 2>/dev/null`;
+        const fallbackReady = cliType === 'hermes'
+          ? `echo "$CONTENT" | grep -q "tools\\|model\\|ready" 2>/dev/null`
+          : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
+        const bufferName = `brain-${ts}-${sanitizeName(agentName)}`;
+        const watcherFile = join(tmpdir(), `brain-watch-${ts}-${sanitizeName(agentName)}.sh`);
+        const watcherContent = `#!/bin/bash
+TARGET="${target}"
+PROMPT="${promptFile}"
+BUFFER="${bufferName}"
+ABSOLUTE_TIMEOUT=3600
+START_TIME=$(date +%s)
+
+check_timeout() {
+  ELAPSED=$(( $(date +%s) - START_TIME ))
+  if [ $ABSOLUTE_TIMEOUT -gt 0 ] && [ $ELAPSED -ge $ABSOLUTE_TIMEOUT ]; then
+    tmux send-keys -t "$TARGET" "${exitCmd}" Enter 2>/dev/null
+    sleep 5
+    tmux kill-pane -t "$TARGET" 2>/dev/null
+    rm -f "${watcherFile}"
+    exit 0
+  fi
+}
+
+READY=0
+for i in $(seq 1 60); do
+  sleep 2
+  check_timeout
+  tmux display-message -t "$TARGET" -p "" 2>/dev/null || exit 0
+  CONTENT=$(tmux capture-pane -t "$TARGET" -p 2>/dev/null)
+  if ${readyPatterns}; then
+    READY=1; break
+  fi
+  if ${fallbackReady}; then
+    READY=1; break
+  fi
+done
+[ $READY -eq 0 ] && sleep 15
+
+tmux load-buffer -b "$BUFFER" "$PROMPT"
+tmux paste-buffer -b "$BUFFER" -t "$TARGET"
+sleep 0.5
+tmux send-keys -t "$TARGET" Enter
+tmux delete-buffer -b "$BUFFER" 2>/dev/null
+rm -f "$PROMPT"
+
+while true; do
+  sleep 5
+  check_timeout
+  tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
+done
+rm -f "${watcherFile}"
+`;
+        writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
+        const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
+        watcher.unref();
+
+        spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
       } catch (err: any) {
         errors.push(`${agentCfg.name}: ${err.message}`);
       }
@@ -1360,7 +1532,9 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           errors: errors.length > 0 ? errors : undefined,
           cli: cliBase,
           layout: spawnLayout,
-          requestedLayout: layout || 'headless',
+          requestedLayout,
+          tmuxSession: detachedTmux?.sessionName,
+          attachCommand: detachedTmux?.attachCommand,
           message: `Swarm launched: ${spawned.length} agents spawned${errors.length ? `, ${errors.length} failed` : ''}. Monitor with brain_agents. Run brain_auto_gate when all agents report done.`,
         }, null, 2),
       }],
@@ -1565,15 +1739,17 @@ pipeline config without spawning anything yet.`,
     goal: z.string().describe('High-level goal to turn into a workflow'),
     max_agents: cNum().optional().describe('Soft cap for the number of agents in the compiled workflow (default: 4, max: 6).'),
     mode: z.enum(['claude', 'py', 'pi', 'pi-core']).optional().describe('Preferred execution mode for the generated conductor config (default: pi-core).'),
+    thinking_level: THINKING_LEVEL_SCHEMA,
     available_models: cArr(z.string()).optional().describe('Optional list of models available for auto-routing.'),
     focus_files: cArr(z.string()).optional().describe('Optional file or directory hints to bias scope assignment.'),
     auto_route_models: cBool().optional().describe('Suggest per-agent models using historical metrics when available (default: true).'),
   },
-  async ({ goal, max_agents, mode, available_models, focus_files, auto_route_models }) => {
+  async ({ goal, max_agents, mode, thinking_level, available_models, focus_files, auto_route_models }) => {
     ensureSession();
     const compiled = compileWorkflowForRoom(goal, {
       max_agents,
       mode,
+      thinking_level,
       available_models,
       focus_files,
       auto_route_models,
@@ -1597,16 +1773,18 @@ not just preview.`,
     goal: z.string().describe('High-level goal to turn into a workflow'),
     max_agents: cNum().optional().describe('Soft cap for the number of agents in the compiled workflow (default: 4, max: 6).'),
     mode: z.enum(['claude', 'py', 'pi', 'pi-core']).optional().describe('Preferred execution mode for the generated conductor config (default: pi-core).'),
+    thinking_level: THINKING_LEVEL_SCHEMA,
     available_models: cArr(z.string()).optional().describe('Optional list of models available for auto-routing.'),
     focus_files: cArr(z.string()).optional().describe('Optional file or directory hints to bias scope assignment.'),
     auto_route_models: cBool().optional().describe('Suggest per-agent models using historical metrics when available (default: true).'),
     config_path: z.string().optional().describe('Optional JSON file path to write the generated conductor config. Relative paths are resolved from the current room.'),
   },
-  async ({ goal, max_agents, mode, available_models, focus_files, auto_route_models, config_path }) => {
+  async ({ goal, max_agents, mode, thinking_level, available_models, focus_files, auto_route_models, config_path }) => {
     const sid = ensureSession();
     const compiled = compileWorkflowForRoom(goal, {
       max_agents,
       mode,
+      thinking_level,
       available_models,
       focus_files,
       auto_route_models,
@@ -1659,6 +1837,7 @@ monitor progress with brain_agents, brain_plan_status, and the log file.`,
     goal: z.string().describe('High-level goal to turn into an executing workflow'),
     max_agents: cNum().optional().describe('Soft cap for the number of agents in the compiled workflow (default: 4, max: 6).'),
     mode: z.enum(['claude', 'py', 'pi', 'pi-core']).optional().describe('Execution mode for the launched conductor (default: pi-core).'),
+    thinking_level: THINKING_LEVEL_SCHEMA,
     available_models: cArr(z.string()).optional().describe('Optional list of models available for auto-routing.'),
     focus_files: cArr(z.string()).optional().describe('Optional file or directory hints to bias scope assignment.'),
     auto_route_models: cBool().optional().describe('Suggest per-agent models using historical metrics when available (default: true).'),
@@ -1666,7 +1845,7 @@ monitor progress with brain_agents, brain_plan_status, and the log file.`,
     config_path: z.string().optional().describe('Optional JSON file path to write the generated conductor config. Relative paths are resolved from the current room.'),
     log_path: z.string().optional().describe('Optional log file path for the launched conductor. Relative paths are resolved from the current room.'),
   },
-  async ({ goal, max_agents, mode, available_models, focus_files, auto_route_models, isolation, config_path, log_path }) => {
+  async ({ goal, max_agents, mode, thinking_level, available_models, focus_files, auto_route_models, isolation, config_path, log_path }) => {
     const sid = ensureSession();
     startLeadWatchdog(sid);
 
@@ -1684,6 +1863,7 @@ monitor progress with brain_agents, brain_plan_status, and the log file.`,
     const compiled = compileWorkflowForRoom(goal, {
       max_agents,
       mode,
+      thinking_level,
       available_models,
       focus_files,
       auto_route_models,
@@ -2031,11 +2211,24 @@ function startLeadWatchdog(leadSessionId: string): void {
 
 server.tool(
   'wake',
-  `Spawn a NEW agent session to handle a task. Supports multiple modes:
-- tmux (default): visible split pane — requires tmux
-- headless: background process — no tmux needed, works everywhere
-- Supports multi-LLM routing via the model parameter (e.g. "haiku" for cheap tasks, "opus" for complex ones)
-- Configurable timeout (default: none for tmux, 30min for headless)`,
+  `Spawn one new external agent session to handle a task.
+THIS TOOL EXISTS TO CREATE A REAL, WATCHABLE CLI SESSION.
+
+CRITICAL CLIENT RULES:
+- Call this tool directly when the user asks for a new agent session, tmux pane, visible Claude/CLI window, or live watching.
+- Do NOT use the client's built-in Agent/delegate/background-agent feature instead.
+- Do NOT summarize what would happen instead of calling the tool.
+
+Modes:
+- layout="horizontal" (default): visible tmux split pane in the current tmux session
+- layout="vertical" | "tiled" | "window": other visible tmux layouts
+- layout="headless": background process
+- if not already in tmux and a visible layout is requested, this tool creates a detached tmux session and returns attachCommand
+
+Supports multi-LLM routing via the model parameter (e.g. "haiku" for cheap tasks, "opus" for complex ones).
+Configurable timeout (default: none for tmux, 30min for headless).
+
+MiniMax/Claude hint: if the user asks for "tmux_wake", "brain_wake", "claude_code_wake", or "claude_session_wake", use this tool.`,
   {
     task: z.string().describe('The full task description for the new session to execute'),
     name: z.string().optional().describe('Name for the new agent session (default: "agent-<timestamp>")'),
@@ -2055,14 +2248,13 @@ server.tool(
     const agentName = name || `agent-${Date.now()}`;
     const agentSessionId = randomUUID();
     const tmuxName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
-    let spawnLayout = layout || 'horizontal';
-    if (spawnLayout !== 'headless') {
-      try {
-        execSync('tmux display-message -p ""', { stdio: 'ignore' });
-      } catch {
-        spawnLayout = 'headless';
-      }
-    }
+    const requestedLayout = layout || 'horizontal';
+    const spawnLayout = requestedLayout;
+    const useVisibleTmux = spawnLayout !== 'headless';
+    const inTmux = useVisibleTmux ? insideTmuxSession() : false;
+    const detachedTmux = useVisibleTmux && !inTmux
+      ? createDetachedTmuxSession(agentName, tmuxName)
+      : null;
     const isHeadless = spawnLayout === 'headless';
     const agentTimeout = timeoutSec ?? (isHeadless ? 1800 : 3600);
     const workspacePath = prepareAgentWorkspace(room, agentName, isolation || 'shared');
@@ -2101,15 +2293,17 @@ server.tool(
 
     // Determine CLI type — BRAIN_DEFAULT_CLI lets hermes auto-spawn hermes agents
     const cliBase = cli || process.env.BRAIN_DEFAULT_CLI || 'claude';
-    const cliType: 'claude' | 'hermes' | 'other' =
+    const cliType: 'claude' | 'hermes' | 'codex' | 'other' =
       (cliBase === 'claude' || cliBase.includes('claude')) ? 'claude' :
       (cliBase === 'hermes' || cliBase.includes('hermes')) ? 'hermes' :
+      (cliBase === 'codex' || cliBase.includes('codex')) ? 'codex' :
       'other';
 
     // Build model flag per CLI
     let modelFlag = '';
     if (model) {
       if (cliType === 'claude') modelFlag = ` --model ${sh(model)}`;
+      if (cliType === 'codex') modelFlag = ` --model ${sh(model)}`;
       // Hermes uses the configured model — pass via env var
     }
 
@@ -2138,13 +2332,16 @@ server.tool(
         // Build the headless command per CLI type
         let headlessCmd: string;
         if (cliType === 'claude') {
-          // claude -p (print mode) — non-interactive, uses all MCP tools, exits when done
-          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)} -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
+          // claude -p (print mode) reads prompt from stdin, avoiding ARG_MAX limits.
+          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)} -p${modelFlag} --dangerously-skip-permissions < ${sh(promptFile)} > ${sh(logFile)} 2>&1`;
         } else if (cliType === 'hermes') {
           // hermes chat -q (single query mode) — non-interactive, uses MCP tools, exits when done
           // -Q suppresses TUI, only prints final response
           const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
           headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
+        } else if (cliType === 'codex') {
+          // codex exec is the supported non-interactive mode; plain `codex` expects an interactive TTY.
+          headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)} exec --full-auto --color never${modelFlag} - < ${sh(promptFile)} > ${sh(logFile)} 2>&1`;
         } else {
           // Generic CLI — pass prompt via stdin
           headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
@@ -2221,7 +2418,7 @@ fi
               agentSessionId,
               taskId,
               mode: 'headless',
-              requestedLayout: layout || 'horizontal',
+              requestedLayout,
               model: model || 'default',
               workspace: workspacePath,
               isolation: isolation || 'shared',
@@ -2239,20 +2436,25 @@ fi
       // ══════════════════════════════════════
       const childEnv = childEnvParts.join(' ');
       let tmuxCmd: string;
-      if (cliType === 'claude') {
-        tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}${modelFlag} --dangerously-skip-permissions`;
-      } else if (cliType === 'hermes') {
-        // Hermes interactive TUI mode — full agent experience in tmux pane
-        const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
-        tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)}`;
-      } else {
-        tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}`;
-      }
+        if (cliType === 'claude') {
+          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}${modelFlag} --dangerously-skip-permissions`;
+        } else if (cliType === 'hermes') {
+          // Hermes interactive TUI mode — full agent experience in tmux pane
+          const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
+          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)}`;
+        } else if (cliType === 'codex') {
+          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)} --no-alt-screen${modelFlag}`;
+        } else {
+          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}`;
+        }
       const bufferName = `brain-${ts}`;
 
       let target: string;
 
-      if (spawnLayout === 'window') {
+      if (detachedTmux) {
+        execSync(`tmux respawn-pane -k -t ${sh(`${detachedTmux.windowTarget}.0`)} ${sh(tmuxCmd)}`);
+        target = execSync(`tmux display-message -p -t ${sh(`${detachedTmux.windowTarget}.0`)} '#{pane_id}'`).toString().trim();
+      } else if (spawnLayout === 'window') {
         execSync(`tmux new-window -n "${tmuxName}" "${tmuxCmd}"`);
         target = tmuxName;
       } else {
@@ -2370,11 +2572,15 @@ rm -f "${watcherFile}"
             agentSessionId,
             taskId,
             layout: spawnLayout,
-            requestedLayout: layout || 'horizontal',
+            requestedLayout,
             model: model || 'default',
             workspace: workspacePath,
             isolation: isolation || 'shared',
-            message: `Spawned "${agentName}" — ${layoutDesc[spawnLayout]}. Pre-registered with heartbeat. Lead watchdog active.`,
+            tmuxSession: detachedTmux?.sessionName,
+            attachCommand: detachedTmux?.attachCommand,
+            message: detachedTmux
+              ? `Spawned "${agentName}" in detached tmux session "${detachedTmux.sessionName}". Attach with: ${detachedTmux.attachCommand}`
+              : `Spawned "${agentName}" — ${layoutDesc[spawnLayout]}. Pre-registered with heartbeat. Lead watchdog active.`,
           }, null, 2),
         }],
       };

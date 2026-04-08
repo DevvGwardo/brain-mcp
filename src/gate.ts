@@ -126,71 +126,69 @@ function parseTscOutput(output: string): GateError[] {
 }
 
 /**
+ * Find the project root by walking up from cwd looking for package.json with a test script.
+ * Returns the project directory, or null if not found.
+ */
+function findProjectRoot(cwd: string): string | null {
+  let dir = cwd;
+  const root = '/';  // stop at filesystem root
+  while (true) {
+    const pkgPath = join(dir, 'package.json');
+    if (existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+        if (pkg.scripts?.test) return dir;
+      } catch { /* ignore */ }
+    }
+    const parent = join(dir, '..');
+    if (parent === dir || dir === root) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
  * Detect available test framework and return the appropriate command.
+ * Only searches within the project root to avoid globbing across the entire home directory.
  */
 function detectTestCommand(cwd: string): { cmd: string; args: string[] } | null {
-  // Check package.json for test script
-  const pkgPath = join(cwd, 'package.json');
-  if (existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-      if (pkg.scripts?.test) {
-        // npm test — detect what framework it uses
-        // Check for vitest.config
-        if (existsSync(join(cwd, 'vitest.config'))) {
-          return { cmd: 'npx', args: ['vitest', 'run', '--reporter=json'] };
-        }
-        if (existsSync(join(cwd, 'jest.config'))) {
-          return { cmd: 'npx', args: ['jest', '--json'] };
-        }
-        // Fallback to npm test
-        return { cmd: 'npm', args: ['test', '--', '--reporter=json'] };
-      }
-    } catch {
-      // Ignore JSON parse errors
+  // Find the nearest package.json with a test script
+  const projectRoot = findProjectRoot(cwd);
+  if (!projectRoot) return null;
+
+  const testDir = projectRoot;
+
+  // Check for vitest config (any extension)
+  const vitestExts = ['.ts', '.js', '.mts', '.mjs'];
+  for (const ext of vitestExts) {
+    if (existsSync(join(testDir, `vitest.config${ext}`))) {
+      return { cmd: 'npx', args: ['vitest', 'run', '--reporter=json'] };
     }
   }
-  
-  // Check for vitest directly
-  if (existsSync(join(cwd, 'vitest.config'))) {
-    return { cmd: 'npx', args: ['vitest', 'run', '--reporter=json'] };
-  }
-  
-  // Check for jest directly
-  if (existsSync(join(cwd, 'jest.config'))) {
-    return { cmd: 'npx', args: ['jest', '--json'] };
-  }
-  
-  // Check for test files to determine framework
-  const testPatterns = [
-    { pattern: '**/*.test.ts', cmd: 'vitest' },
-    { pattern: '**/*.spec.ts', cmd: 'vitest' },
-    { pattern: '**/*.test.js', cmd: 'jest' },
-    { pattern: '**/*.spec.js', cmd: 'jest' },
-    { pattern: '**/*.test.mjs', cmd: 'node' },
-  ];
-  
-  // Default: try to find any test files
-  for (const tp of testPatterns) {
-    try {
-      const result = execSync(`find . -name "${tp.pattern.split('/').pop()}" -type f 2>/dev/null | head -5`, {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 5000,
-      });
-      if (result.trim()) {
-        if (tp.cmd === 'node') {
-          // For .mjs test files, try to run with test harness
-          return { cmd: 'node', args: ['--test', '--test-name-pattern=.*'] };
-        }
-        return { cmd: 'npx', args: [tp.cmd, 'run'] };
-      }
-    } catch {
-      // find failed, continue
+
+  // Check for jest config
+  const jestExts = ['.ts', '.js', '.mjs', '.json'];
+  for (const ext of jestExts) {
+    if (existsSync(join(testDir, `jest.config${ext}`))) {
+      return { cmd: 'npx', args: ['jest', '--json'] };
     }
   }
-  
-  return null;
+
+  // Check package.json for test script type
+  try {
+    const pkg = JSON.parse(readFileSync(join(testDir, 'package.json'), 'utf-8'));
+    const testScript = pkg.scripts?.test || '';
+    if (testScript.includes('vitest')) {
+      return { cmd: 'npx', args: ['vitest', 'run', '--reporter=json'] };
+    }
+    if (testScript.includes('jest')) {
+      return { cmd: 'npx', args: ['jest', '--json'] };
+    }
+    // Fallback to npm test
+    return { cmd: 'npm', args: ['test'] };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -199,7 +197,7 @@ function detectTestCommand(cwd: string): { cmd: string; args: string[] } | null 
 function runTests(cwd: string, timeout = PERFORMANCE_BASELINES.test_timeout): TestResult {
   const start = Date.now();
   const testCmd = detectTestCommand(cwd);
-  
+
   if (!testCmd) {
     return {
       passed: true,
@@ -210,10 +208,13 @@ function runTests(cwd: string, timeout = PERFORMANCE_BASELINES.test_timeout): Te
       failures: [],
     };
   }
-  
+
+  // Run tests from the project root, not the room directory
+  const projectRoot = findProjectRoot(cwd) || cwd;
+
   try {
     const output = execSync(`${testCmd.cmd} ${testCmd.args.join(' ')}`, {
-      cwd,
+      cwd: projectRoot,
       encoding: 'utf-8',
       timeout,
       env: { ...process.env, FORCE_COLOR: '0' },
@@ -516,15 +517,18 @@ function runPerformanceBaselines(db: BrainDB, room: string): PerformanceBaseline
  */
 export function runGate(db: BrainDB, room: string, cwd: string): GateResult {
   const overallStart = Date.now();
-  
+
+  // Resolve project root for TSC and test checks
+  const projectRoot = findProjectRoot(cwd) || cwd;
+
   // ── 1. TypeScript compilation check ──
   let tscErrors: GateError[] = [];
-  const hasTsConfig = existsSync(join(cwd, 'tsconfig.json'));
+  const hasTsConfig = existsSync(join(projectRoot, 'tsconfig.json'));
 
   if (hasTsConfig) {
     try {
       execSync('npx tsc --noEmit 2>&1', {
-        cwd,
+        cwd: projectRoot,
         encoding: 'utf-8',
         timeout: PERFORMANCE_BASELINES.tsc_timeout,
       });

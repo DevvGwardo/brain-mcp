@@ -89,8 +89,13 @@ export function registerMessagingTools(
       const sessions = db.getSessions();
       const byName = sessions.find(s => s.name === to);
       if (byName) targetId = byName.id;
+      // Validate target session exists
+      const targetExists = sessions.some(s => s.id === targetId);
+      if (!targetExists) {
+        return reply({ ok: false, error: `Target session '${to}' not found. No active session with that name or ID.`, target: targetId });
+      }
       const id = db.sendDM(sid, sessionName, targetId, content);
-      return ack({ to: targetId });
+      return ack({ to: targetId, messageId: id });
     }
   );
 

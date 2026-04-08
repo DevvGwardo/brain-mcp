@@ -283,7 +283,8 @@ const TOOL_RENDERERS: Partial<Record<string, ToolRenderer>> = {
       const status = a.status ?? 'idle';
       const age = a.heartbeat_age_seconds ?? 0;
       const ageStr = age < 60 ? `${age}s` : `${Math.floor(age / 60)}m`;
-      const claims = a.held_claims?.length ? `${a.held_claims.length} claims` : '0 claims';
+      const claimList = a.claims ?? a.held_claims ?? [];
+      const claims = claimList.length ? `${claimList.length} claim${claimList.length !== 1 ? 's' : ''}` : '0 claims';
       const progress = a.progress ? String(a.progress).slice(0, 80) : 'No progress reported';
       const boxLines = [
         `${statusIcon(status, age)} ${name} ${statusLabel(status)}${a.is_stale ? ` ${color('STALE', C.red)}` : ''}`,

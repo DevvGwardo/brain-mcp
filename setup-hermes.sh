@@ -52,19 +52,12 @@ echo "Step 3: Registering brain MCP server with hermes..."
 if ! command -v hermes &>/dev/null; then
   echo "  ⚠ hermes not found in PATH — skipping MCP registration"
   echo "    Install hermes: curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash"
-  echo "    Then run: hermes mcp add brain -- node $BRAIN_INDEX"
+  echo "    Then run: hermes mcp add brain --command node --args $BRAIN_INDEX"
 else
-  # Register with BRAIN_DEFAULT_CLI=hermes so wake auto-spawns hermes agents
   hermes mcp remove brain 2>/dev/null
-  hermes mcp add brain --env BRAIN_DEFAULT_CLI=hermes -- node "$BRAIN_INDEX" 2>/dev/null \
-    && echo "  ✓ Registered brain MCP server (with BRAIN_DEFAULT_CLI=hermes)" \
-    || {
-      # Fallback: register without --env flag (older hermes versions)
-      hermes mcp add brain -- node "$BRAIN_INDEX" 2>/dev/null \
-        && echo "  ✓ Registered brain MCP server" \
-        || echo "  ✓ brain MCP already registered"
-      echo "  ⚠ Could not set BRAIN_DEFAULT_CLI env — see manual config below"
-    }
+  hermes mcp add brain --command node --args "$BRAIN_INDEX" 2>/dev/null \
+    && echo "  ✓ Registered brain MCP server" \
+    || echo "  ⚠ Could not register brain MCP server — try manually: hermes mcp add brain --command node --args $BRAIN_INDEX"
 
   # Also register with Claude Code if available
   if command -v claude &>/dev/null; then
@@ -93,6 +86,9 @@ echo "     wake({ task: '...', cli: 'hermes', layout: 'headless' })"
 echo ""
 echo "  3. From hermes interactive:"
 echo "     hermes -q 'Use register, then wake to spawn 3 agents'"
+echo ""
+echo "  Verify the MCP connection with:"
+echo "     hermes mcp test brain"
 echo ""
 echo "  Brain tools in hermes usually appear as mcp_brain_register, mcp_brain_claim, mcp_brain_post, etc."
 echo "  In Claude and other MCP clients, prefer the short names: register, claim, post, wake, agents."

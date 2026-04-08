@@ -28,17 +28,7 @@ Spawn parallel Hermes agents. Give them a shared brain. Ship in one command.<br>
 
 ## Install
 
-**Option 1 — npm (fastest)**
-```bash
-npm install -g @hermes/brain-mcp
-```
-
-Then register with Hermes:
-```bash
-hermes mcp add brain -s user -- brain-mcp
-```
-
-**Option 2 — from source**
+**Option 1 — bootstrap from source (recommended for Hermes)**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DevvGwardo/brain-mcp/main/install.sh | bash
 ```
@@ -46,15 +36,28 @@ curl -fsSL https://raw.githubusercontent.com/DevvGwardo/brain-mcp/main/install.s
 The installer:
 1. Builds the Node.js MCP server (`brain-mcp`)
 2. Installs the Python orchestration package (`hermes-brain`)
-3. Registers the brain as an MCP server in Hermes and Claude Code
+3. Registers the brain as an MCP server in Hermes
+
+**Option 2 — manual install**
+```bash
+git clone https://github.com/DevvGwardo/brain-mcp.git
+cd brain-mcp
+npm install
+npm run build
+pip install -e .
+hermes mcp add brain --command node --args "$PWD/dist/index.js"
+```
+
+**Note:** the npm package is not published yet, so the repository install path is the supported path for now.
 
 **Verify:**
 ```bash
 hermes mcp list | grep brain
+hermes mcp test brain
 hermes-brain --help
 ```
 
-**Prerequisites:** Python 3.10+, Node.js 18+, [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Claude Code](https://docs.claude.com/claude-code/getting-started.html)
+**Prerequisites:** Python 3.10+, Node.js 18+, [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 
 **Sharing with friends?** Each person's brain is its own isolated SQLite DB — no network config needed. Same one-liner works anywhere.
 

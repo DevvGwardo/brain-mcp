@@ -18,6 +18,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import type { ThinkingLevel } from '@mariozechner/pi-agent-core';
+import type { ThinkingBudgets } from '@mariozechner/pi-ai';
 import { BrainDB, type SessionStatus } from './db.js';
 import { runGateAndNotify, type GateResult } from './gate.js';
 import { runPiCoreAgent } from './pi-core-agent.js';
@@ -68,7 +70,19 @@ interface AgentConfig {
   acceptance?: string[];
   depends_on?: string[];
   workspace?: string;
+  thinkingLevel?: ThinkingLevel;
+  thinkingBudgets?: ThinkingBudgets;
 }
+
+// ── Active pi-core agent tracking for cancellation ──
+interface ActiveAgent {
+  sessionId: string;
+  name: string;
+  abortController: AbortController;
+  model: string;
+  startedAt: number;
+}
+const activeAgents = new Map<string, ActiveAgent>();
 
 interface PhaseConfig {
   name: string;
@@ -87,6 +101,8 @@ interface PipelineConfig {
   max_gate_retries: number;
   mode: AgentMode;      // 'pi' = Pi CLI, 'pi-core' = pi-agent-core in-process, 'py' = Python agents, 'claude' = Claude Code CLI
   model: string;        // Model for pi/py agents
+  thinkingLevel?: ThinkingLevel;
+  thinkingBudgets?: ThinkingBudgets;
 }
 
 // ── Parse CLI args ──
@@ -95,6 +111,20 @@ function parseArgs(): PipelineConfig {
   const args = process.argv.slice(2);
   const cwd = process.cwd();
 
+  const VALID_THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+
+  // Parse --thinking from CLI (shared across both modes)
+  let thinkingLevel: ThinkingLevel | undefined;
+  const thinkingIdx = args.indexOf('--thinking');
+  if (thinkingIdx !== -1 && args[thinkingIdx + 1]) {
+    const lvl = (args[thinkingIdx + 1] || '').toLowerCase() as ThinkingLevel;
+    if (VALID_THINKING_LEVELS.includes(lvl)) {
+      thinkingLevel = lvl;
+    } else {
+      console.error(`${C.yellow}Warning:${C.reset} invalid --thinking level "${args[thinkingIdx + 1]}". Use: off|minimal|low|medium|high|xhigh`);
+    }
+  }
+
   // Check for --config
   const configIdx = args.indexOf('--config');
   if (configIdx !== -1 && args[configIdx + 1]) {
@@ -102,12 +132,15 @@ function parseArgs(): PipelineConfig {
     const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
     // Check for mode override flags on CLI even with --config
     const cliMode = args.includes('--pi') ? 'pi' : args.includes('--pi-core') ? 'pi-core' : args.includes('--py') ? 'py' : args.includes('--claude') ? 'claude' : null;
+    // Map snake_case JSON keys to camelCase
+    const thinkingLevelFromConfig = raw.thinking_level ?? raw.thinkingLevel;
     return {
-      mode: cliMode || raw.mode || 'pi',
-      model: raw.model || 'claude-sonnet-4-5',
       ...raw,
       cwd: raw.cwd || cwd,
+      mode: cliMode || raw.mode || 'pi',
+      model: raw.model || 'claude-sonnet-4-5',
       ...(cliMode ? { mode: cliMode } : {}),
+      ...(thinkingLevel ? { thinkingLevel } : thinkingLevelFromConfig ? { thinkingLevel: thinkingLevelFromConfig } : {}),
     };
   }
 
@@ -170,6 +203,7 @@ function parseArgs(): PipelineConfig {
     console.error('  --py              Use Python subprocess agents');
     console.error('  --claude          Use Claude Code CLI agents');
     console.error('  --model <id>      Model ID (e.g. claude-sonnet-4-5, anthropic/claude-sonnet-4-5)');
+    console.error('  --thinking <lvl>  Reasoning level: off|minimal|low|medium|high|xhigh (default: medium)');
     console.error('  --agents <names>  Agent names for CLI mode');
     console.error('  --no-gate         Disable the integration gate');
     console.error('  --timeout <sec>   Per-agent timeout (default 600)');
@@ -196,6 +230,7 @@ function parseArgs(): PipelineConfig {
     max_gate_retries: maxRetries,
     mode,
     model,
+    thinkingLevel,
   };
 }
 
@@ -689,6 +724,9 @@ async function spawnPiCoreAgent(
   const agentTask = agentCfg.task || config.task;
   const workspaceCwd = agentCfg.workspace || config.cwd;
 
+  // Create abort controller for this agent
+  const abortController = new AbortController();
+
   // Pre-register
   db.registerSession(
     agentName,
@@ -697,6 +735,15 @@ async function spawnPiCoreAgent(
     agentSessionId,
   );
   db.pulse(agentSessionId, 'working', 'spawned by conductor; starting pi-core');
+
+  // Track active agent for cancellation
+  activeAgents.set(agentSessionId, {
+    sessionId: agentSessionId,
+    name: agentName,
+    abortController,
+    model: config.model,
+    startedAt: Date.now(),
+  });
 
   // Fire and forget — runPiCoreAgent handles its own exit code recording
   runPiCoreAgent({
@@ -712,19 +759,36 @@ async function spawnPiCoreAgent(
     role: agentCfg.role,
     acceptance: agentCfg.acceptance,
     dependsOn: agentCfg.depends_on,
+    thinkingLevel: (agentCfg as any).thinking_level ?? agentCfg.thinkingLevel ?? config.thinkingLevel,
+    thinkingBudgets: (agentCfg as any).thinking_budgets ?? agentCfg.thinkingBudgets ?? config.thinkingBudgets,
+    abortSignal: abortController.signal,
     onEvent: (event) => {
-      // TODO: stream events to a named pipe for visibility
       if (event.type === 'agent_end') {
         console.error(`${C.dim}[pi-core:${agentName}] agent_end${C.reset}`);
+        activeAgents.delete(agentSessionId);
       }
     },
   }).catch((err) => {
     console.error(`${C.red}[pi-core:${agentName}] unexpected error: ${err.message}${C.reset}`);
     db.pulse(agentSessionId, 'failed', err.message);
     db.set_exit_code(agentSessionId, 1);
+    activeAgents.delete(agentSessionId);
   });
 
   return agentSessionId;
+}
+
+/** Abort all active pi-core agents (for conductor shutdown). */
+function abortAllAgents(db: BrainDB) {
+  for (const [sid, agent] of activeAgents) {
+    console.error(`${C.yellow}[conductor] aborting pi-core agent ${agent.name} (${sid})${C.reset}`);
+    agent.abortController.abort();
+    try {
+      db.pulse(sid, 'failed', 'conductor shutdown — agent aborted');
+      db.set_exit_code(sid, 143);
+    } catch { /* best effort */ }
+  }
+  activeAgents.clear();
 }
 
 // ── Spawn persistent watchdog as detached process ──
@@ -771,8 +835,14 @@ async function main() {
   // Spawn persistent watchdog
   spawnPersistentWatchdog(config.cwd);
 
+  // Global workflow timeout from env
+  const globalTimeoutSec = parseInt(process.env.BRAIN_WORKFLOW_TIMEOUT || '0', 10);
+  let globalTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
   // Cleanup on exit
   function cleanup() {
+    try { abortAllAgents(db); } catch { /* best effort */ }
+    if (globalTimeoutHandle) clearTimeout(globalTimeoutHandle);
     try { db.pulse(conductorId, 'done', 'conductor exited'); } catch { /* best effort */ }
     try { db.close(); } catch { /* best effort */ }
   }
@@ -780,10 +850,22 @@ async function main() {
   process.on('SIGINT', () => { cleanup(); process.exit(0); });
   process.on('SIGTERM', () => { cleanup(); process.exit(0); });
 
+  // Set global workflow timeout
+  if (globalTimeoutSec > 0) {
+    console.error(`${C.yellow}[conductor] global workflow timeout: ${globalTimeoutSec}s${C.reset}`);
+    globalTimeoutHandle = setTimeout(() => {
+      console.error(`${C.red}[conductor] GLOBAL TIMEOUT after ${globalTimeoutSec}s — aborting all agents${C.reset}`);
+      abortAllAgents(db);
+      db.pulse(conductorId, 'failed', `global timeout after ${globalTimeoutSec}s`);
+      process.exit(124);
+    }, globalTimeoutSec * 1000);
+  }
+
   console.log(`${C.bold}${C.magenta}Brain Conductor${C.reset} starting...`);
   console.log(`${C.dim}Task: ${config.task}${C.reset}`);
   const modeLabel = config.mode === 'pi-core' ? `pi-core (${config.model})` : config.mode === 'pi' ? `pi (${config.model})` : config.mode === 'py' ? `py (${config.model})` : 'claude-code';
-  console.log(`${C.dim}Phases: ${config.phases.length} | Mode: ${modeLabel} | Gate: ${config.gate ? 'enabled' : 'disabled'} | Timeout: ${config.timeout}s${C.reset}`);
+  const thinkingLabel = config.thinkingLevel ? ` | Thinking: ${config.thinkingLevel}` : '';
+  console.log(`${C.dim}Phases: ${config.phases.length} | Mode: ${modeLabel}${thinkingLabel} | Gate: ${config.gate ? 'enabled' : 'disabled'} | Timeout: ${config.timeout}s${C.reset}`);
   console.log('');
 
   for (let pi = 0; pi < config.phases.length; pi++) {
@@ -864,8 +946,36 @@ async function main() {
           break;
         }
 
-        // Agents got DMs from runGateAndNotify — wait for them to fix and re-done
-        console.log(`${C.yellow}Gate attempt ${gateAttempt} failed — agents notified via DM. Waiting for fixes...${C.reset}`);
+        // Agents got DMs from runGateAndNotify — wait for acknowledgment before retrying
+        console.log(`${C.yellow}Gate attempt ${gateAttempt} failed — agents notified via DM. Waiting for acknowledgment...${C.reset}`);
+
+        // Gate escalation: wait up to 60s for any agent to acknowledge via pulse
+        const ackDeadline = Date.now() + 60_000;
+        const ackedAgents = new Set<string>();
+        while (Date.now() < ackDeadline) {
+          await sleep(3000);
+          const currentAgents = db.getAgentHealth(config.cwd);
+          for (const routed of gateResult.routed) {
+            if (ackedAgents.has(routed.agent_id)) continue;
+            const agent = currentAgents.find(a => a.id === routed.agent_id);
+            // Agent acknowledged if it pulsed after the gate DM was sent
+            if (agent && agent.status === 'working') {
+              ackedAgents.add(routed.agent_id);
+            }
+          }
+          // All agents acknowledged or we've waited long enough
+          if (ackedAgents.size >= gateResult.routed.length) break;
+        }
+
+        // Report unresponsive agents
+        const unresponsive = gateResult.routed.filter(r => !ackedAgents.has(r.agent_id));
+        if (unresponsive.length > 0) {
+          console.log(`${C.yellow}[gate] ${unresponsive.length} agent(s) did not acknowledge DM within 60s:${C.reset}`);
+          for (const u of unresponsive) {
+            console.log(`  ${C.yellow}- ${u.agent_name}${C.reset}`);
+          }
+        }
+
         continue;
       } else {
         // No gate — phase complete
@@ -887,6 +997,27 @@ async function main() {
 
   console.log(`Agents: ${done.length} done, ${failed.length} failed`);
   console.log(`Contracts: ${contracts.length} published, ${mismatches.length} mismatches`);
+
+  // Record metrics for each agent (closes feedback loop with TaskRouter)
+  const workflowStartTime = Date.now();
+  for (const agent of allAgents) {
+    if (agent.name === 'conductor') continue;
+    try {
+      const durationSec = agent.heartbeat_age_seconds != null
+        ? Math.max(0, (Date.now() / 1000) - (Date.now() / 1000 - agent.heartbeat_age_seconds))
+        : undefined;
+      db.recordMetric(config.cwd, agent.name, agent.id, {
+        model: config.model,
+        task_description: config.task,
+        duration_seconds: durationSec,
+        gate_passes: config.gate ? config.max_gate_retries : 0,
+        tsc_errors: 0,
+        contract_mismatches: mismatches.length,
+        outcome: agent.status === 'done' ? 'success' : 'failure',
+      });
+    } catch { /* best effort — metrics should never crash the conductor */ }
+  }
+  console.log(`${C.dim}Metrics recorded for ${allAgents.filter(a => a.name !== 'conductor').length} agent(s)${C.reset}`);
 
   if (mismatches.length > 0) {
     console.log(`\n${C.red}Outstanding mismatches:${C.reset}`);

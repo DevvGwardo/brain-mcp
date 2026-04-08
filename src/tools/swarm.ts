@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { BrainDB } from '../db.js';
 import { minimalAgentPrompt } from '../autopilot.js';
 import { spawnWithRecovery, savePreSpawnCheckpoint, buildRecoveryContext, classifyError } from '../spawn-recovery.js';
+import { cNum, cBool, cArr } from './schema-helpers.js';
 
 interface SwarmToolsOptions {
   db: BrainDB;
@@ -39,33 +40,7 @@ export function registerSwarmTools(
     startLeadWatchdog, prepareAgentWorkspace, incrementSpawnedAgentCount,
   } = options;
 
-  // Schema coercion helpers
-  const cNum = () => z.preprocess(
-    (v: unknown) => typeof v === 'string' && (v as string).trim() !== '' ? Number(v) : v,
-    z.number(),
-  );
-  const cBool = () => z.preprocess(
-    (v: unknown) => {
-      if (typeof v !== 'string') return v;
-      const s = (v as string).toLowerCase().trim();
-      if (s === 'true' || s === '1' || s === 'yes') return true;
-      if (s === 'false' || s === '0' || s === 'no' || s === '') return false;
-      return v;
-    },
-    z.boolean(),
-  );
-  const cArr = <T extends z.ZodTypeAny>(item: T) => z.preprocess(
-    (v: unknown) => {
-      if (typeof v !== 'string') return v;
-      try {
-        const parsed = JSON.parse(v as string);
-        return Array.isArray(parsed) ? parsed : v;
-      } catch {
-        return v;
-      }
-    },
-    z.array(item),
-  );
+
 
   function sh(value: string): string {
     return `'${value.replace(/'/g, `'\\''`)}'`;

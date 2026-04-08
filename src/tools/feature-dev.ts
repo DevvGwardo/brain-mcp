@@ -1,34 +1,7 @@
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import type { BrainDB } from '../db.js';
-
-// ── Schema helpers ──
-const cNum = () => z.preprocess(
-  (v) => typeof v === 'string' && v.trim() !== '' ? Number(v) : v,
-  z.number(),
-);
-const cBool = () => z.preprocess(
-  (v) => {
-    if (typeof v !== 'string') return v;
-    const s = v.toLowerCase().trim();
-    if (s === 'true' || s === '1' || s === 'yes') return true;
-    if (s === 'false' || s === '0' || s === 'no' || s === '') return false;
-    return v;
-  },
-  z.boolean(),
-);
-const cArr = <T extends z.ZodTypeAny>(item: T) => z.preprocess(
-  (v) => {
-    if (typeof v !== 'string') return v;
-    try {
-      const parsed = JSON.parse(v);
-      return Array.isArray(parsed) ? parsed : v;
-    } catch {
-      return v;
-    }
-  },
-  z.array(item),
-);
+import { cNum, cBool, cArr } from './schema-helpers.js';
 
 export interface FeatureDevToolsOptions {
   db: BrainDB;

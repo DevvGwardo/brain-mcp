@@ -33,6 +33,12 @@ export interface AgentHealth {
   claims: string[];
 }
 
+export interface SessionWorkSummary {
+  didWork: boolean;
+  totalArtifacts: number;
+  summary: string;
+}
+
 export interface Message {
   id: number;
   channel: string;
@@ -804,6 +810,47 @@ export class BrainDB {
     return this._cacheStmt('SELECT * FROM sessions WHERE id = ?').get(id) as Session | undefined;
   }
 
+  getSessionWorkSummary(sessionId: string): SessionWorkSummary {
+    const msgs = Number((this.db.prepare(
+      'SELECT COUNT(*) AS n FROM messages WHERE sender_id = ?'
+    ).get(sessionId) as { n: number } | undefined)?.n || 0);
+    const dms = Number((this.db.prepare(
+      'SELECT COUNT(*) AS n FROM direct_messages WHERE from_id = ?'
+    ).get(sessionId) as { n: number } | undefined)?.n || 0);
+    const contracts = Number((this.db.prepare(
+      'SELECT COUNT(*) AS n FROM contracts WHERE agent_id = ?'
+    ).get(sessionId) as { n: number } | undefined)?.n || 0);
+    const ledger = Number((this.db.prepare(
+      'SELECT COUNT(*) AS n FROM context_ledger WHERE session_id = ?'
+    ).get(sessionId) as { n: number } | undefined)?.n || 0);
+    const checkpoints = Number((this.db.prepare(
+      'SELECT COUNT(*) AS n FROM checkpoints WHERE session_id = ?'
+    ).get(sessionId) as { n: number } | undefined)?.n || 0);
+    const stateWrites = Number((this.db.prepare(
+      'SELECT COUNT(*) AS n FROM state WHERE updated_by = ?'
+    ).get(sessionId) as { n: number } | undefined)?.n || 0);
+    const memories = Number((this.db.prepare(
+      'SELECT COUNT(*) AS n FROM memory WHERE created_by = ?'
+    ).get(sessionId) as { n: number } | undefined)?.n || 0);
+
+    const parts: string[] = [];
+    if (msgs > 0) parts.push(`${msgs} msg`);
+    if (dms > 0) parts.push(`${dms} dm`);
+    if (contracts > 0) parts.push(`${contracts} contract`);
+    if (ledger > 0) parts.push(`${ledger} ledger`);
+    if (checkpoints > 0) parts.push(`${checkpoints} checkpoint`);
+    if (stateWrites > 0) parts.push(`${stateWrites} state`);
+    if (memories > 0) parts.push(`${memories} memory`);
+
+    const totalArtifacts = msgs + dms + contracts + ledger + checkpoints + stateWrites + memories;
+
+    return {
+      didWork: totalArtifacts > 0,
+      totalArtifacts,
+      summary: parts.join(', ') || 'nothing observable',
+    };
+  }
+
   getSessions(room?: string): Session[] {
     this.pruneStaleSessions();
     if (room) {
@@ -820,8 +867,28 @@ export class BrainDB {
     this.db.prepare('UPDATE sessions SET exit_code = ? WHERE id = ?').run(exit_code, session_id);
   }
 
-  setSessionPid(session_id: string, pid: number): void {
+  setSessionPid(session_id: string, pid: number | null): void {
     this.db.prepare('UPDATE sessions SET pid = ? WHERE id = ?').run(pid, session_id);
+  }
+
+  mergeSessionMetadata(session_id: string, patch: Record<string, unknown>): void {
+    const session = this.getSession(session_id);
+    if (!session) return;
+
+    let current: Record<string, unknown> = {};
+    if (session.metadata) {
+      try {
+        const parsed = JSON.parse(session.metadata);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          current = parsed as Record<string, unknown>;
+        }
+      } catch {
+        current = {};
+      }
+    }
+
+    this.db.prepare('UPDATE sessions SET metadata = ? WHERE id = ?')
+      .run(JSON.stringify({ ...current, ...patch }), session_id);
   }
 
   /** Transition session to 'working' only after confirmed process start. */

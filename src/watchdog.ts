@@ -23,6 +23,7 @@ import {
   type RecoveryContext,
 } from './spawn-recovery.js';
 import { createServerLogger } from './server-log.js';
+import { getTmuxPanePid, isTmuxTargetAlive, readTmuxTargetFromSession } from './tmux-runtime.js';
 
 const dbPath = process.env.BRAIN_DB_PATH || `${process.env.HOME}/.claude/brain/brain.db`;
 const room = process.env.BRAIN_ROOM || process.cwd();
@@ -287,8 +288,20 @@ async function main() {
           const session = db.getSession(agent.id);
           let processAlive = false;
           let processInfo: ReturnType<typeof getProcessInfo> | null = null;
+          const tmuxTarget = readTmuxTargetFromSession(session);
 
-          if (session?.pid) {
+          if (tmuxTarget) {
+            processAlive = isTmuxTargetAlive(tmuxTarget);
+            if (processAlive) {
+              const panePid = getTmuxPanePid(tmuxTarget);
+              if (panePid && panePid !== session?.pid) {
+                db.setSessionPid(agent.id, panePid);
+              }
+              processInfo = panePid
+                ? getProcessInfo(panePid)
+                : { alive: true, state: 'tmux', cmd: tmuxTarget };
+            }
+          } else if (session?.pid) {
             processInfo = getProcessInfo(session.pid);
             processAlive = processInfo !== null && processInfo.alive;
           }
@@ -342,7 +355,10 @@ async function main() {
             recordFailure(record, deathType);
 
             const severity = shouldEscalate(record) ? 'ESCALATED' : 'WARN';
-            log(`[${severity}] Agent ${agent.name} confirmed dead (${deathType}, pid=${session?.pid}, processAlive=${processAlive}, attempt ${record.failureCount})`);
+            const runtimeRef = tmuxTarget
+              ? `tmux_target=${tmuxTarget}`
+              : `pid=${session?.pid ?? 'unknown'}`;
+            log(`[${severity}] Agent ${agent.name} confirmed dead (${deathType}, ${runtimeRef}, processAlive=${processAlive}, attempt ${record.failureCount})`);
 
             // ── CRITICAL FIX: Mark the session as 'failed' with exit code.
             // Previously this was missing — sessions stuck at 'working' forever (ghost sessions).
@@ -350,7 +366,9 @@ async function main() {
               agent.id,
               -1, // Unknown exit code — process is already gone; we infer failure.
               true, // failed=true
-              `watchdog confirmed dead: ${deathType}, pid=${session?.pid ?? 'unknown'}`,
+              tmuxTarget
+                ? `watchdog confirmed dead: ${deathType}, tmux_target=${tmuxTarget}`
+                : `watchdog confirmed dead: ${deathType}, pid=${session?.pid ?? 'unknown'}`,
             );
 
             // Build recovery context and attempt respawn

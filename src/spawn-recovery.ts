@@ -374,6 +374,12 @@ interface StartupCheckResult {
   error?: string;
 }
 
+export interface SessionExitResolution {
+  finalized: boolean;
+  status?: 'done' | 'failed';
+  progress?: string;
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -407,7 +413,53 @@ function readFailureDetails(logFile: string, exitCodeFile: string): { exitCode?:
   return { exitCode, error };
 }
 
+export function reconcileSessionExit(
+  db: BrainDB,
+  sessionId: string,
+  exitCode: number,
+  detail?: string,
+): SessionExitResolution {
+  const session = db.getSession(sessionId);
+  if (!session) return { finalized: false };
+
+  const normalizedExitCode = Number.isFinite(exitCode) ? exitCode : -1;
+  db.set_exit_code(sessionId, normalizedExitCode);
+
+  if (session.status === 'done' || session.status === 'failed') {
+    return {
+      finalized: false,
+      status: session.status,
+      progress: session.progress || undefined,
+    };
+  }
+
+  const work = db.getSessionWorkSummary(sessionId);
+  const hasConfirmedWork = session.status === 'working' || work.didWork;
+
+  if (normalizedExitCode === 0) {
+    if (!hasConfirmedWork) {
+      const progress = 'process exited before first heartbeat';
+      db.markDone(sessionId, normalizedExitCode, true, progress);
+      return { finalized: true, status: 'failed', progress };
+    }
+
+    const progress = work.didWork
+      ? `process completed (exit 0, ${work.summary})`
+      : 'process completed (exit 0)';
+    db.markDone(sessionId, normalizedExitCode, false, progress);
+    return { finalized: true, status: 'done', progress };
+  }
+
+  const progress = detail
+    ? `process exited with code ${normalizedExitCode}: ${detail}`
+    : `process exited with code ${normalizedExitCode}`;
+  db.markDone(sessionId, normalizedExitCode, true, progress.slice(0, 1000));
+  return { finalized: true, status: 'failed', progress };
+}
+
 function waitForStartup(
+  db: BrainDB,
+  sessionId: string,
   proc: ReturnType<typeof spawn>,
   pid: number,
   logFile: string,
@@ -434,8 +486,19 @@ function waitForStartup(
     const onExit = (code: number | null) => {
       earlyExitCode = code ?? -1;
       if (earlyExitCode === 0) {
-        // Process completed successfully before startup grace — fast-completing agent
-        finish({ started: true });
+        const session = db.getSession(sessionId);
+        const work = db.getSessionWorkSummary(sessionId);
+        const hasConfirmedWork = !!session && (
+          session.status === 'working' ||
+          session.status === 'done' ||
+          session.status === 'failed' ||
+          work.didWork
+        );
+        finish({
+          started: hasConfirmedWork,
+          exitCode: 0,
+          error: hasConfirmedWork ? undefined : 'process exited before first heartbeat',
+        });
         return;
       }
       const failure = readFailureDetails(logFile, exitCodeFile);
@@ -535,12 +598,38 @@ export async function spawnWithRecovery(
       }
       proc.unref();
 
-      const startup = await waitForStartup(proc, spawnedPid, logFile, exitCodeFile);
+      let startupConfirmed = false;
+      const onFinalExit = (code: number | null) => {
+        if (!startupConfirmed) return;
+        const failure = readFailureDetails(logFile, exitCodeFile);
+        reconcileSessionExit(
+          db,
+          agentId,
+          failure.exitCode ?? code ?? -1,
+          failure.error,
+        );
+      };
+      proc.on('exit', onFinalExit);
+
+      const startup = await waitForStartup(db, agentId, proc, spawnedPid, logFile, exitCodeFile);
       if (startup.started) {
+        startupConfirmed = true;
+        if (proc.exitCode !== null) {
+          const failure = readFailureDetails(logFile, exitCodeFile);
+          reconcileSessionExit(
+            db,
+            agentId,
+            failure.exitCode ?? proc.exitCode ?? 0,
+            failure.error,
+          );
+          proc.removeListener('exit', onFinalExit);
+        }
         // Success — clear failure record
         clearFailureRecord(agentId);
         return { success: true, pid: spawnedPid!, attempt };
       }
+
+      proc.removeListener('exit', onFinalExit);
 
       const errMsg = startup.error ?? `exited with code ${startup.exitCode ?? -1}`;
       const classified = classifyProcessFailure(errMsg, startup.exitCode);

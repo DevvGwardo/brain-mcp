@@ -1,0 +1,4 @@
+name: brain-swarm
+version: 0.1.0
+description: Launch named brain-mcp swarm and workflow presets from Hermes.
+author: brain-mcp

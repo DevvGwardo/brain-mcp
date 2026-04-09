@@ -5,7 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { basename, join, resolve } from 'node:path';
 import { execSync, spawn } from 'node:child_process';
-import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -15,9 +15,10 @@ import { createEmbeddingProvider } from './embeddings.js';
 import { TaskRouter } from './router.js';
 import { registerAutopilot, minimalAgentPrompt } from './autopilot.js';
 import { compileWorkflow } from './workflow.js';
-import { spawnWithRecovery, cleanupSpawnTempFiles } from './spawn-recovery.js';
+import { spawnWithRecovery, cleanupSpawnTempFiles, reconcileSessionExit } from './spawn-recovery.js';
 import { renderTool } from './renderer.js';
 import { createServerLogger } from './server-log.js';
+import { registerTmuxSessionRuntime } from './tmux-runtime.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
 // Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
@@ -177,6 +178,28 @@ type IsolationMode = 'shared' | 'snapshot';
 
 function sanitizeName(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'agent';
+}
+
+function attachTmuxWatcherFinalizer(
+  watcher: ReturnType<typeof spawn>,
+  sessionId: string,
+  stateFile: string,
+) {
+  watcher.on('error', (err) => {
+    try { db.markDone(sessionId, -1, true, `watcher failed: ${err.message}`); } catch { /* best effort */ }
+  });
+  watcher.on('exit', () => {
+    try {
+      const raw = existsSync(stateFile) ? readFileSync(stateFile, 'utf8').trim() : '';
+      if (raw === 'timeout') {
+        reconcileSessionExit(db, sessionId, 124, 'tmux watcher timed out');
+      } else if (raw === 'pane_closed' || raw === '') {
+        reconcileSessionExit(db, sessionId, 0, 'tmux pane closed');
+      }
+    } catch { /* best effort */ }
+    try { unlinkSync(stateFile); } catch { /* best effort */ }
+  });
+  watcher.unref();
 }
 
 function prepareAgentWorkspace(baseCwd: string, agentName: string, isolation: IsolationMode): string {
@@ -1465,16 +1488,19 @@ MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_c
           : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
         const bufferName = `brain-${ts}-${sanitizeName(agentName)}`;
         const watcherFile = join(tmpdir(), `brain-watch-${ts}-${sanitizeName(agentName)}.sh`);
+        const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${sanitizeName(agentName)}.state`);
         const watcherContent = `#!/bin/bash
 TARGET="${target}"
 PROMPT="${promptFile}"
 BUFFER="${bufferName}"
 ABSOLUTE_TIMEOUT=3600
 START_TIME=$(date +%s)
+STATE_FILE="${watcherStateFile}"
 
 check_timeout() {
   ELAPSED=$(( $(date +%s) - START_TIME ))
   if [ $ABSOLUTE_TIMEOUT -gt 0 ] && [ $ELAPSED -ge $ABSOLUTE_TIMEOUT ]; then
+    printf '%s\n' "timeout" > "$STATE_FILE"
     tmux send-keys -t "$TARGET" "${exitCmd}" Enter 2>/dev/null
     sleep 5
     tmux kill-pane -t "$TARGET" 2>/dev/null
@@ -1510,11 +1536,13 @@ while true; do
   check_timeout
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
+printf '%s\n' "pane_closed" > "$STATE_FILE"
 rm -f "${watcherFile}"
 `;
         writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
         const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-        watcher.unref();
+        registerTmuxSessionRuntime(db, agentSessionId, target);
+        attachTmuxWatcherFinalizer(watcher, agentSessionId, watcherStateFile);
 
         spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
       } catch (err: any) {
@@ -2499,16 +2527,19 @@ fi
         : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
 
       const watcherFile = join(tmpdir(), `brain-watch-${ts}.sh`);
+      const watcherStateFile = join(tmpdir(), `brain-watch-${ts}.state`);
       const watcherContent = `#!/bin/bash
 TARGET="${target}"
 PROMPT="${promptFile}"
 BUFFER="${bufferName}"
 ABSOLUTE_TIMEOUT=${agentTimeout}
 START_TIME=$(date +%s)
+STATE_FILE="${watcherStateFile}"
 
 check_timeout() {
   ELAPSED=$(( $(date +%s) - START_TIME ))
   if [ $ABSOLUTE_TIMEOUT -gt 0 ] && [ $ELAPSED -ge $ABSOLUTE_TIMEOUT ]; then
+    printf '%s\n' "timeout" > "$STATE_FILE"
     tmux send-keys -t "$TARGET" "${exitCmd}" Enter 2>/dev/null
     sleep 5
     tmux kill-pane -t "$TARGET" 2>/dev/null
@@ -2547,15 +2578,14 @@ while true; do
   check_timeout
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
+printf '%s\n' "pane_closed" > "$STATE_FILE"
 rm -f "${watcherFile}"
 `;
       writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
 
       const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-      watcher.on('error', (err) => {
-        try { db.markDone(agentSessionId, -1, true, `watcher failed: ${err.message}`); } catch { /* best effort */ }
-      });
-      watcher.unref();
+      registerTmuxSessionRuntime(db, agentSessionId, target);
+      attachTmuxWatcherFinalizer(watcher, agentSessionId, watcherStateFile);
 
       const layoutDesc: Record<string, string> = {
         vertical: 'stacked top/bottom',

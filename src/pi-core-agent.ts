@@ -15,6 +15,7 @@ import { getModel } from '@mariozechner/pi-ai';
 import type { Model, ThinkingBudgets } from '@mariozechner/pi-ai';
 import type { AgentEvent, ThinkingLevel } from '@mariozechner/pi-agent-core';
 import { BrainDB } from './db.js';
+import { resolvePiModelSpec } from './model-resolution.js';
 import { createBrainTools } from './pi-core-tools.js';
 import { createServerLogger } from './server-log.js';
 
@@ -37,19 +38,9 @@ export interface PiCoreAgentConfig {
   abortSignal?: AbortSignal;
 }
 
-function parseModelString(model: string): { provider: string; id: string } {
-  // Handle "provider/model" format
-  if (model.includes('/')) {
-    const [provider, id] = model.split('/');
-    return { provider: provider || 'anthropic', id: id || model };
-  }
-  // Bare model ID — assume anthropic
-  return { provider: 'anthropic', id: model };
-}
-
 export async function runPiCoreAgent(config: PiCoreAgentConfig): Promise<{ exitCode: number; finalStatus: string }> {
   const agentLog = createServerLogger({ component: `pi-core:${config.name}`, room: config.room });
-  const { provider, id } = parseModelString(config.model);
+  const { provider, id } = resolvePiModelSpec(config.model);
   const resolvedModel: Model<any> | undefined = getModel(provider as any, id as any);
 
   if (!resolvedModel) {

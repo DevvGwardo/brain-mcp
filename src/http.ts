@@ -13,6 +13,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { BrainDB } from './db.js';
+import { createServerLogger } from './server-log.js';
 
 // Dynamic imports to avoid breaking stdio-only mode if deps are missing
 async function loadDeps() {
@@ -36,6 +37,7 @@ export async function startHttpServer(
   port: number,
   host = '127.0.0.1',
 ): Promise<void> {
+  const serverLog = createServerLogger({ component: 'brain-http', room });
   const { McpServer, StreamableHTTPServerTransport, createApp } = await loadDeps();
 
   const app = createApp({ host });
@@ -197,10 +199,10 @@ export async function startHttpServer(
   // ── Start ───────────────────────────────────────────────────────────────
 
   app.listen(port, host, () => {
-    console.error(`[brain-mcp] HTTP server listening on http://${host}:${port}`);
-    console.error(`[brain-mcp]   MCP endpoint: POST/GET/DELETE /mcp`);
-    console.error(`[brain-mcp]   SSE events:   GET /sse/events`);
-    console.error(`[brain-mcp]   REST API:     GET /api/{sessions,agents,messages,memory,metrics,plan}`);
-    console.error(`[brain-mcp]   Health:       GET /health`);
+    serverLog.log(`HTTP server listening on http://${host}:${port}`);
+    serverLog.log('  MCP endpoint: POST/GET/DELETE /mcp');
+    serverLog.log('  SSE events:   GET /sse/events');
+    serverLog.log('  REST API:     GET /api/{sessions,agents,messages,memory,metrics,plan}');
+    serverLog.log('  Health:       GET /health');
   });
 }

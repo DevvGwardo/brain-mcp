@@ -14,7 +14,7 @@
  */
 
 import { execSync, spawn as spawnProcess } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -22,7 +22,10 @@ import type { ThinkingLevel } from '@mariozechner/pi-agent-core';
 import type { ThinkingBudgets } from '@mariozechner/pi-ai';
 import { BrainDB, type SessionStatus } from './db.js';
 import { runGateAndNotify, type GateResult } from './gate.js';
+import { resolvePiModelSpec } from './model-resolution.js';
 import { runPiCoreAgent } from './pi-core-agent.js';
+import { reconcileSessionExit } from './spawn-recovery.js';
+import { registerTmuxSessionRuntime } from './tmux-runtime.js';
 
 // ── ANSI helpers ──
 
@@ -241,6 +244,29 @@ function sh(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function attachTmuxWatcherFinalizer(
+  db: BrainDB,
+  watcher: ReturnType<typeof spawnProcess>,
+  sessionId: string,
+  stateFile: string,
+) {
+  watcher.on('error', (err) => {
+    try { db.markDone(sessionId, -1, true, `watcher failed: ${err.message}`); } catch { /* best effort */ }
+  });
+  watcher.on('exit', () => {
+    try {
+      const raw = existsSync(stateFile) ? readFileSync(stateFile, 'utf8').trim() : '';
+      if (raw === 'timeout') {
+        reconcileSessionExit(db, sessionId, 124, 'tmux watcher timed out');
+      } else if (raw === 'pane_closed' || raw === '') {
+        reconcileSessionExit(db, sessionId, 0, 'tmux pane closed');
+      }
+    } catch { /* best effort */ }
+    try { unlinkSync(stateFile); } catch { /* best effort */ }
+  });
+  watcher.unref();
+}
+
 // ── Resolve path to agents/ directory (next to dist/) ──
 
 function agentsDir(): string {
@@ -274,7 +300,7 @@ function spawnAgent(
 
   const modeLabel = config.mode === 'pi' ? 'pi agent' : config.mode === 'py' ? 'py agent' : 'Claude';
 
-  db.pulse(agentSessionId, 'working', `spawned by conductor; starting ${modeLabel}`);
+  db.pulse(agentSessionId, 'queued', `spawn queued by conductor; waiting for first heartbeat (${modeLabel})`);
 
   // Build env vars (shared between all modes)
   const envParts = [
@@ -321,11 +347,8 @@ function spawnAgent(
     const systemFile = join(tmpdir(), `brain-sys-${ts}-${tmuxName}.txt`);
     writeFileSync(systemFile, brainPrompt);
 
-    // Resolve model — for direct anthropic provider, use model names like claude-sonnet-4-5
     const piModel = agentModel || 'claude-sonnet-4-5';
-    // Determine provider from model name
-    const piProvider = piModel.includes('/') ? piModel.split('/')[0] : 'anthropic';
-    const piModelId = piModel.includes('/') ? piModel : piModel;
+    const { provider: piProvider, id: piModelId } = resolvePiModelSpec(piModel);
 
     // Build the pi command
     // --print = non-interactive, process prompt and exit
@@ -360,15 +383,17 @@ function spawnAgent(
 
     // Simple timeout watcher (records exit code on agent exit)
     const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
-    const dbPath4Watch = (process.env.BRAIN_DB_PATH || '').replace(/'/g, "'\\''");
+    const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
     const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 ABSOLUTE_TIMEOUT=${config.timeout}
 START_TIME=$(date +%s)
+STATE_FILE="${watcherStateFile}"
 while true; do
   sleep 5
   ELAPSED=$(( $(date +%s) - START_TIME ))
   if [ $ELAPSED -ge $ABSOLUTE_TIMEOUT ]; then
+    printf '%s\n' "timeout" > "$STATE_FILE"
     tmux send-keys -t "$TARGET" C-c 2>/dev/null
     sleep 2
     tmux kill-pane -t "$TARGET" 2>/dev/null
@@ -377,17 +402,13 @@ while true; do
   fi
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
-AGENT_EXIT_CODE=$?
-node -e "
-const { BrainDB } = require('${join(import.meta.dirname, 'db.js').replace(/'/g, "'\\''")}');
-const db = new BrainDB(process.env.BRAIN_DB_PATH || '${dbPath4Watch}');
-db.set_exit_code('${agentSessionId}', AGENT_EXIT_CODE);
-" 2>/dev/null || true
+printf '%s\n' "pane_closed" > "$STATE_FILE"
 rm -f "${watcherFile}" "${systemFile}"
 `;
     writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
     const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-    watcher.unref();
+    registerTmuxSessionRuntime(db, agentSessionId, paneId);
+    attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
 
   } else if (config.mode === 'py') {
     // ── Python agent mode ──
@@ -412,15 +433,17 @@ rm -f "${watcherFile}" "${systemFile}"
     // Simple timeout watcher (records exit code on agent exit)
     const ts = Date.now();
     const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
-    const dbPath4Watch = (process.env.BRAIN_DB_PATH || '').replace(/'/g, "'\\''");
+    const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
     const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 ABSOLUTE_TIMEOUT=${config.timeout}
 START_TIME=$(date +%s)
+STATE_FILE="${watcherStateFile}"
 while true; do
   sleep 5
   ELAPSED=$(( $(date +%s) - START_TIME ))
   if [ $ELAPSED -ge $ABSOLUTE_TIMEOUT ]; then
+    printf '%s\n' "timeout" > "$STATE_FILE"
     tmux send-keys -t "$TARGET" C-c 2>/dev/null
     sleep 2
     tmux kill-pane -t "$TARGET" 2>/dev/null
@@ -429,17 +452,13 @@ while true; do
   fi
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
-AGENT_EXIT_CODE=$?
-node -e "
-const { BrainDB } = require('${join(import.meta.dirname, 'db.js').replace(/'/g, "'\\''")}');
-const db = new BrainDB(process.env.BRAIN_DB_PATH || '${dbPath4Watch}');
-db.set_exit_code('${agentSessionId}', AGENT_EXIT_CODE);
-" 2>/dev/null || true
+printf '%s\n' "pane_closed" > "$STATE_FILE"
 rm -f "${watcherFile}"
 `;
     writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
     const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-    watcher.unref();
+    registerTmuxSessionRuntime(db, agentSessionId, paneId);
+    attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
 
   } else {
     // ── Claude Code mode (original) ──
@@ -512,17 +531,19 @@ rm -f "${watcherFile}"
 
     // Watcher: wait for ready, paste prompt, wait for exit or timeout
     const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
-    const dbPath4Watch = (process.env.BRAIN_DB_PATH || '').replace(/'/g, "'\\''");
+    const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
     const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 PROMPT="${promptFile}"
 BUFFER="${bufferName}"
 ABSOLUTE_TIMEOUT=${config.timeout}
 START_TIME=$(date +%s)
+STATE_FILE="${watcherStateFile}"
 
 check_timeout() {
   ELAPSED=$(( $(date +%s) - START_TIME ))
   if [ $ELAPSED -ge $ABSOLUTE_TIMEOUT ]; then
+    printf '%s\n' "timeout" > "$STATE_FILE"
     tmux send-keys -t "$TARGET" "/exit" Enter 2>/dev/null
     sleep 5
     tmux kill-pane -t "$TARGET" 2>/dev/null
@@ -553,23 +574,18 @@ tmux send-keys -t "$TARGET" Enter
 tmux delete-buffer -b "$BUFFER" 2>/dev/null
 rm -f "$PROMPT"
 
-AGENT_EXIT_CODE=0
 while true; do
   sleep 5
   check_timeout
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
-# Record exit code
-node -e "
-const { BrainDB } = require('${join(import.meta.dirname, 'db.js').replace(/'/g, "'\\''")}');
-const db = new BrainDB(process.env.BRAIN_DB_PATH || '${dbPath4Watch}');
-db.set_exit_code('${agentSessionId}', AGENT_EXIT_CODE);
-" 2>/dev/null || true
+printf '%s\n' "pane_closed" > "$STATE_FILE"
 rm -f "${watcherFile}"
 `;
     writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
     const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-    watcher.unref();
+    registerTmuxSessionRuntime(db, agentSessionId, paneId);
+    attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
   }
 
   return agentSessionId;

@@ -1,0 +1,88 @@
+presets:
+  fullstack-4:
+    kind: swarm
+    description: Four specialist Hermes agents for broad product and app work.
+    default_cli: hermes
+    default_layout: headless
+    tmux_layout: tiled
+    goal_template: "Full-stack objective: {goal}"
+    isolation: shared
+    agents:
+      - name: architect
+        role: integration-owner
+        task: |
+          Own the cross-cutting plan for: {goal}
+          Break the work into concrete slices, note risky interfaces, and keep the other agents aligned through brain state and messages.
+        acceptance:
+          - Publish the planned seams, dependencies, and integration checkpoints.
+      - name: frontend
+        role: frontend-owner
+        files:
+          - src/
+          - app/
+          - web/
+          - ui/
+        task: |
+          Own the user-facing implementation for: {goal}
+          Focus on UI state, data flow, and any surface area that users will directly interact with.
+      - name: backend
+        role: backend-owner
+        files:
+          - src/
+          - server/
+          - api/
+          - db/
+        task: |
+          Own the server, API, persistence, and integration logic for: {goal}
+          Update schemas, contracts, and backend behavior needed to make the feature work end to end.
+      - name: verifier
+        role: reviewer
+        task: |
+          Verify the combined result for: {goal}
+          Check integration gaps, missing tests, and regression risk. Publish a short ship/no-ship summary with exact follow-ups.
+        acceptance:
+          - Summarize what is done, what is risky, and what still needs validation.
+
+  bugfix-3:
+    kind: swarm
+    description: Triage, patch, and verify a focused bugfix with visible tmux support.
+    default_cli: hermes
+    default_layout: headless
+    tmux_layout: tiled
+    goal_template: "Bugfix objective: {goal}"
+    isolation: shared
+    agents:
+      - name: triage
+        role: bug-investigator
+        task: |
+          Reproduce and isolate the bug for: {goal}
+          Identify likely root cause, affected files, and the smallest safe fix path.
+        acceptance:
+          - Publish a root-cause note and likely file ownership before wrapping up.
+      - name: fixer
+        role: implementation-owner
+        files:
+          - src/
+          - app/
+          - server/
+        task: |
+          Implement the best fix for: {goal}
+          Respect any triage findings already posted to the brain and keep the patch narrow unless the root cause demands a broader correction.
+      - name: verifier
+        role: test-owner
+        task: |
+          Validate the fix for: {goal}
+          Check regression risk, missing tests, and whether follow-up cleanup should be queued separately.
+        acceptance:
+          - Publish exact validation steps or remaining gaps.
+
+  workflow-4:
+    kind: workflow
+    description: Compile the goal into a conductor-managed workflow and run it in the background.
+    default_cli: hermes
+    goal_template: "{goal}"
+    max_agents: 4
+    mode: pi-core
+    thinking_level: medium
+    auto_route_models: true
+    isolation: shared

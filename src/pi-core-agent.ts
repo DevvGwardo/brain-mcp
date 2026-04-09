@@ -16,6 +16,7 @@ import type { Model, ThinkingBudgets } from '@mariozechner/pi-ai';
 import type { AgentEvent, ThinkingLevel } from '@mariozechner/pi-agent-core';
 import { BrainDB } from './db.js';
 import { createBrainTools } from './pi-core-tools.js';
+import { createServerLogger } from './server-log.js';
 
 export interface PiCoreAgentConfig {
   name: string;
@@ -47,6 +48,7 @@ function parseModelString(model: string): { provider: string; id: string } {
 }
 
 export async function runPiCoreAgent(config: PiCoreAgentConfig): Promise<{ exitCode: number; finalStatus: string }> {
+  const agentLog = createServerLogger({ component: `pi-core:${config.name}`, room: config.room });
   const { provider, id } = parseModelString(config.model);
   const resolvedModel: Model<any> | undefined = getModel(provider as any, id as any);
 
@@ -114,12 +116,12 @@ export async function runPiCoreAgent(config: PiCoreAgentConfig): Promise<{ exitC
     // beforeToolCall fires on EVERY tool — this is the auto-heartbeat
     beforeToolCall: async (ctx) => {
       config.db.pulse(config.sessionId, 'working', `tool:${ctx.toolCall.name} ${JSON.stringify(ctx.args).slice(0, 50)}`);
-      console.error(`[pi-core:${config.name}] tool_call: ${ctx.toolCall.name} args=${JSON.stringify(ctx.args).slice(0, 100)}`);
+      agentLog.log(`tool_call ${ctx.toolCall.name} args=${JSON.stringify(ctx.args).slice(0, 100)}`);
       return undefined;
     },
     // afterToolCall: log result for observability
     afterToolCall: async (ctx) => {
-      console.error(`[pi-core:${config.name}] tool_result: ${ctx.toolCall.name} isError=${ctx.isError} result=${JSON.stringify(ctx.result).slice(0, 100)}`);
+      agentLog.log(`tool_result ${ctx.toolCall.name} isError=${ctx.isError} result=${JSON.stringify(ctx.result).slice(0, 100)}`);
       if (ctx.isError) {
         const textContent = ctx.result.content?.find((c: any) => c.type === 'text') as any;
         config.db.pulse(config.sessionId, 'failed', `tool failed: ${ctx.toolCall.name} — ${textContent?.text?.slice(0, 100) ?? 'no message'}`);
@@ -131,7 +133,7 @@ export async function runPiCoreAgent(config: PiCoreAgentConfig): Promise<{ exitC
   // Wire abortSignal to agent
   if (config.abortSignal) {
     config.abortSignal.addEventListener('abort', () => {
-      console.error(`[pi-core:${config.name}] abort signal received`);
+      agentLog.log('abort signal received');
       agent.abort();
     }, { once: true });
   }
@@ -141,7 +143,7 @@ export async function runPiCoreAgent(config: PiCoreAgentConfig): Promise<{ exitC
     agent.subscribe(async (event) => {
       switch (event.type) {
         case 'agent_start':
-          console.error(`[pi-core:${config.name}] agent_start — thinking=${config.thinkingLevel ?? 'medium'}`);
+          agentLog.log(`agent_start thinking=${config.thinkingLevel ?? 'medium'}`);
           config.db.pulse(config.sessionId, 'working', 'agent started');
           break;
         case 'turn_start':
@@ -157,7 +159,7 @@ export async function runPiCoreAgent(config: PiCoreAgentConfig): Promise<{ exitC
           config.db.pulse(config.sessionId, 'working', `executing tool:${event.toolName}`);
           break;
         case 'agent_end':
-          console.error(`[pi-core:${config.name}] agent_end — ${event.messages.length} messages in transcript`);
+          agentLog.log(`agent_end ${event.messages.length} message(s) in transcript`);
           break;
       }
       config.onEvent?.(event);

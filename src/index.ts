@@ -17,6 +17,7 @@ import { registerAutopilot, minimalAgentPrompt } from './autopilot.js';
 import { compileWorkflow } from './workflow.js';
 import { spawnWithRecovery, cleanupSpawnTempFiles } from './spawn-recovery.js';
 import { renderTool } from './renderer.js';
+import { createServerLogger } from './server-log.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
 // Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
@@ -59,6 +60,7 @@ const THINKING_LEVEL_SCHEMA = z.enum(['off', 'minimal', 'low', 'medium', 'high',
 const db = new BrainDB(process.env.BRAIN_DB_PATH);
 const room = process.env.BRAIN_ROOM || process.cwd();
 const roomLabel = basename(room);
+const serverLog = createServerLogger({ component: 'brain-mcp', room, roomLabel });
 
 // Initialize embedding provider for semantic memory (silent no-op if no API key)
 const embeddingProvider = createEmbeddingProvider();
@@ -89,7 +91,7 @@ const TEMP_FILE_PATTERNS = [
     }
   } catch { /* tmpdir may not exist */ }
   if (removed > 0) {
-    console.error(`[brain-mcp] Cleaned up ${removed} stale temp file(s) on startup`);
+    serverLog.log(`startup cleanup removed ${removed} stale temp file(s)`);
   }
 })();
 
@@ -105,8 +107,7 @@ setInterval(() => {
   try {
     const cleaned = db.sweepGhostSessions(3); // 3-minute threshold for ghosts
     if (cleaned > 0) {
-      // Log to stderr so it shows up in server logs but doesn't break the MCP protocol
-      console.error(`[brain] ghost sweep: cleaned ${cleaned} stale-queued sessions`);
+      serverLog.log(`ghost sweep cleaned ${cleaned} stale-queued session(s)`);
     }
   } catch { /* best-effort */ }
 }, GHOST_SWEEP_INTERVAL_MS);

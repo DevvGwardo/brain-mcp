@@ -22,10 +22,12 @@ import {
   markGhostSession,
   type RecoveryContext,
 } from './spawn-recovery.js';
+import { createServerLogger } from './server-log.js';
 
 const dbPath = process.env.BRAIN_DB_PATH || `${process.env.HOME}/.claude/brain/brain.db`;
 const room = process.env.BRAIN_ROOM || process.cwd();
 const pollInterval = 15000; // 15 seconds
+const watchdogLog = createServerLogger({ component: 'watchdog', room });
 
 // Thresholds
 const SPAWN_FAILURE_THRESHOLD_SEC = 30;  // Agent died within 30s of creation → spawn failure
@@ -59,7 +61,7 @@ interface AgentFailureRecord {
 const failureTracker = new Map<string, AgentFailureRecord>();
 
 function log(msg: string) {
-  console.error(`[watchdog ${new Date().toISOString()}] ${msg}`);
+  watchdogLog.log(msg);
 }
 
 // ── Temp file cleanup ─────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { BrainDB } from './db.js';
+import { createServerLogger } from './server-log.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -319,7 +320,7 @@ export function savePreSpawnCheckpoint(
     });
   } catch (e) {
     // Non-fatal — checkpoint is for recovery, not critical path
-    console.error(`[spawn-recovery] Failed to save pre-spawn checkpoint: ${e}`);
+    createServerLogger({ component: 'spawn-recovery', room }).log(`failed to save pre-spawn checkpoint: ${e}`);
   }
 }
 

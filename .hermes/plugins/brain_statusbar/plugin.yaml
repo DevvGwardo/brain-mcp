@@ -1,0 +1,4 @@
+name: brain-statusbar
+version: 0.1.0
+description: Show brain-mcp status in the Hermes CLI status bar.
+author: brain-mcp

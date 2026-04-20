@@ -1,4 +1,6 @@
 name: brain-swarm
-version: 0.1.0
-description: Launch named brain-mcp swarm and workflow presets from Hermes.
+version: 0.2.0
+description: >
+  Brain-MCP slash commands for Hermes: /agents (launch presets),
+  /brain (overview), /status (agent health), /claim (file locking), /post (messages).
 author: brain-mcp

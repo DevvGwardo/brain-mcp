@@ -1,4 +1,12 @@
-"""Hermes project plugin: launch named brain-mcp presets with /agents."""
+"""Hermes project plugin: brain-mcp slash commands for multi-agent orchestration.
+
+Commands:
+  /agents  — Launch named swarm/workflow presets
+  /brain   — Show brain status (agents, claims, messages)
+  /claim   — Claim or release files for exclusive editing
+  /post    — Post a message to the brain channel
+  /status  — Show active agents and heartbeats
+"""
 
 from __future__ import annotations
 
@@ -34,9 +42,10 @@ class ToolInvocation:
 
 
 def register(ctx) -> None:
-    """Register the /agents slash command and its compatibility shim."""
+    """Register all brain-mcp slash commands."""
     _install_plugin_command_shim()
     _register_agents_command(ctx)
+    _register_brain_commands(ctx)
 
 
 def _install_plugin_command_shim() -> None:
@@ -94,6 +103,213 @@ def _register_agents_command(ctx) -> None:
         "description": "Launch named brain-mcp presets",
         "plugin": ctx.manifest.name,
     }
+
+
+def _register_brain_commands(ctx) -> None:
+    """Register /brain, /status, /claim, and /post commands."""
+    try:
+        from hermes_cli.commands import (
+            COMMAND_REGISTRY,
+            CommandDef,
+            register_plugin_command,
+        )
+
+        commands = [
+            ("brain", "Show brain overview: active agents, claims, recent messages", "Tools & Skills", ("b",), "[agents|claims|messages|state]"),
+            ("status", "Show active agents with heartbeat health", "Tools & Skills", ("st",), ""),
+            ("claim", "Claim or release files for exclusive editing", "Tools & Skills", (), "[release] <file1> [file2 ...]"),
+            ("post", "Post a message to the brain channel", "Tools & Skills", ("say",), "<message>"),
+        ]
+        for name, desc, category, aliases, args_hint in commands:
+            if not any(cmd.name == name for cmd in COMMAND_REGISTRY):
+                kwargs: dict[str, Any] = {}
+                if aliases:
+                    kwargs["aliases"] = aliases
+                if args_hint:
+                    kwargs["args_hint"] = args_hint
+                register_plugin_command(CommandDef(name, desc, category, **kwargs))
+    except ImportError:
+        pass
+
+    if not hasattr(ctx._manager, "_plugin_commands"):
+        ctx._manager._plugin_commands = {}
+
+    handlers = {
+        "brain": _handle_brain_command,
+        "status": _handle_status_command,
+        "claim": _handle_claim_command,
+        "post": _handle_post_command,
+    }
+    for cmd_name, handler in handlers.items():
+        ctx._manager._plugin_commands[cmd_name] = {
+            "handler": handler,
+            "description": f"brain-mcp /{cmd_name}",
+            "plugin": ctx.manifest.name,
+        }
+
+
+def _handle_brain_command(raw_args: str) -> str:
+    """Show brain overview — agents, claims, messages, or state."""
+    args = shlex.split(raw_args or "") if raw_args else []
+    room = _current_room()
+
+    subcommand = args[0] if args else "overview"
+
+    tool_map = {
+        "agents": ("agents", {}),
+        "claims": ("claims", {}),
+        "messages": ("read", {"channel": "general", "limit": 10}),
+        "state": ("keys", {}),
+    }
+
+    if subcommand == "overview":
+        client = _McpProcessClient(room=room, default_cli="hermes")
+        try:
+            sections = []
+
+            agents_resp = client.call_tool("agents", {})
+            agents_data = _extract_tool_payload(agents_resp)
+            sections.append("── Agents ──")
+            sections.append(_format_payload(agents_data))
+
+            claims_resp = client.call_tool("claims", {})
+            claims_data = _extract_tool_payload(claims_resp)
+            sections.append("\n── Claims ──")
+            sections.append(_format_payload(claims_data))
+
+            msgs_resp = client.call_tool("read", {"channel": "general", "limit": 5})
+            msgs_data = _extract_tool_payload(msgs_resp)
+            sections.append("\n── Recent Messages ──")
+            sections.append(_format_payload(msgs_data))
+
+            return "\n".join(sections)
+        finally:
+            client.close()
+
+    if subcommand not in tool_map:
+        return f"Unknown /brain subcommand: {subcommand}\nUsage: /brain [agents|claims|messages|state]"
+
+    tool_name, tool_args = tool_map[subcommand]
+    client = _McpProcessClient(room=room, default_cli="hermes")
+    try:
+        resp = client.call_tool(tool_name, tool_args)
+        payload = _extract_tool_payload(resp)
+        return _format_payload(payload)
+    finally:
+        client.close()
+
+
+def _handle_status_command(raw_args: str) -> str:
+    """Show active agents with heartbeat status."""
+    room = _current_room()
+    client = _McpProcessClient(room=room, default_cli="hermes")
+    try:
+        resp = client.call_tool("agents", {})
+        payload = _extract_tool_payload(resp)
+        data = payload.get("data")
+
+        if isinstance(data, list):
+            if not data:
+                return "No active agents."
+            lines = ["Active agents:"]
+            for agent in data:
+                if isinstance(agent, dict):
+                    name = agent.get("name") or agent.get("session_name") or "?"
+                    status = agent.get("status") or "unknown"
+                    age = agent.get("heartbeat_age_seconds")
+                    age_str = f" ({age}s ago)" if age is not None else ""
+                    lines.append(f"  {name:<16} {status}{age_str}")
+                else:
+                    lines.append(f"  {agent}")
+            return "\n".join(lines)
+
+        return _format_payload(payload)
+    finally:
+        client.close()
+
+
+def _handle_claim_command(raw_args: str) -> str:
+    """Claim or release files."""
+    args = shlex.split(raw_args or "") if raw_args else []
+    if not args:
+        room = _current_room()
+        client = _McpProcessClient(room=room, default_cli="hermes")
+        try:
+            resp = client.call_tool("claims", {})
+            payload = _extract_tool_payload(resp)
+            return _format_payload(payload) or "No active claims."
+        finally:
+            client.close()
+
+    room = _current_room()
+    release = args[0] == "release"
+    files = args[1:] if release else args
+
+    if not files:
+        return "Usage: /claim [release] <file1> [file2 ...]"
+
+    client = _McpProcessClient(room=room, default_cli="hermes")
+    try:
+        results = []
+        tool = "release" if release else "claim"
+        for f in files:
+            resp = client.call_tool(tool, {"path": f})
+            payload = _extract_tool_payload(resp)
+            status = "released" if release else "claimed"
+            if payload.get("is_error"):
+                results.append(f"  ✗ {f} — {payload.get('text', 'failed')}")
+            else:
+                results.append(f"  ✓ {f} — {status}")
+        return "\n".join(results)
+    finally:
+        client.close()
+
+
+def _handle_post_command(raw_args: str) -> str:
+    """Post a message to the brain channel."""
+    message = (raw_args or "").strip()
+    if not message:
+        return "Usage: /post <message>"
+
+    room = _current_room()
+    client = _McpProcessClient(room=room, default_cli="hermes")
+    try:
+        resp = client.call_tool("post", {"channel": "general", "message": message})
+        payload = _extract_tool_payload(resp)
+        if payload.get("is_error"):
+            return f"Failed to post: {payload.get('text', 'unknown error')}"
+        return f"Posted to brain: {message[:80]}"
+    finally:
+        client.close()
+
+
+def _format_payload(payload: dict[str, Any]) -> str:
+    """Format an extracted tool payload for display."""
+    data = payload.get("data")
+    if data is None:
+        return payload.get("text") or "(empty)"
+    if isinstance(data, str):
+        return data
+    if isinstance(data, list):
+        if not data:
+            return "(none)"
+        lines = []
+        for item in data:
+            if isinstance(item, dict):
+                parts = [f"{k}={v}" for k, v in item.items() if v is not None]
+                lines.append("  " + " | ".join(parts))
+            else:
+                lines.append(f"  {item}")
+        return "\n".join(lines)
+    if isinstance(data, dict):
+        lines = []
+        for k, v in data.items():
+            if isinstance(v, list):
+                lines.append(f"  {k}: ({len(v)} items)")
+            elif v is not None:
+                lines.append(f"  {k}: {v}")
+        return "\n".join(lines) or "(empty)"
+    return str(data)
 
 
 def _handle_agents_command(raw_args: str) -> str:

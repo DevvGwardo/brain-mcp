@@ -10,7 +10,7 @@
  * 4. Escalation for repeated failures with backoff
  */
 
-import { BrainDB } from './db.js';
+import { BrainDB, type AgentFailureDeathType } from './db.js';
 import { randomUUID } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { existsSync, readdirSync, unlinkSync, statSync } from 'node:fs';
@@ -56,10 +56,8 @@ interface AgentFailureRecord {
   lastFailureAt: number;        // Unix ms
   lastSpawnedAt: number | null; // Unix ms — when we (or conductor) spawned it
   backoffUntil: number;         // Unix ms — don't respawn before this
-  deathType: 'spawn_failure' | 'crash' | 'unknown';
+  deathType: AgentFailureDeathType;
 }
-
-const failureTracker = new Map<string, AgentFailureRecord>();
 
 function log(msg: string) {
   watchdogLog.log(msg);
@@ -132,8 +130,13 @@ function getProcessInfo(pid: number): { alive: boolean; state: string; cmd: stri
 // ── Failure tracking ──────────────────────────────────────────────────────────
 
 function getOrCreateFailureRecord(agentId: string, agentName: string): AgentFailureRecord {
-  if (!failureTracker.has(agentId)) {
-    failureTracker.set(agentId, {
+  const row = db.failure_get(agentId);
+  if (!row) {
+    db.failure_record(agentId, {
+      agent_name: agentName,
+      death_type: 'unknown',
+    });
+    return {
       agentId,
       agentName,
       failureCount: 0,
@@ -141,9 +144,17 @@ function getOrCreateFailureRecord(agentId: string, agentName: string): AgentFail
       lastSpawnedAt: null,
       backoffUntil: 0,
       deathType: 'unknown',
-    });
+    };
   }
-  return failureTracker.get(agentId)!;
+  return {
+    agentId: row.agent_id,
+    agentName: row.agent_name,
+    failureCount: row.failure_count,
+    lastFailureAt: row.last_failure_at,
+    lastSpawnedAt: row.last_spawned_at,
+    backoffUntil: row.backoff_until,
+    deathType: row.death_type,
+  };
 }
 
 function recordFailure(record: AgentFailureRecord, deathType: 'spawn_failure' | 'crash'): void {
@@ -157,6 +168,13 @@ function recordFailure(record: AgentFailureRecord, deathType: 'spawn_failure' | 
     BACKOFF_MAX_SEC * 1000,
   );
   record.backoffUntil = Date.now() + backoffMs;
+  db.failure_record(record.agentId, {
+    agent_name: record.agentName,
+    failure_count: record.failureCount,
+    last_failure_at: record.lastFailureAt,
+    backoff_until: record.backoffUntil,
+    death_type: record.deathType,
+  });
 }
 
 function shouldEscalate(record: AgentFailureRecord): boolean {
@@ -237,6 +255,14 @@ async function attemptRespawn(
   );
 
   record.lastSpawnedAt = now;
+  db.failure_record(agentId, {
+    agent_name: agentName,
+    last_spawned_at: now,
+    failure_count: record.failureCount,
+    last_failure_at: record.lastFailureAt,
+    backoff_until: record.backoffUntil,
+    death_type: record.deathType,
+  });
 
   return {
     spawned: true,

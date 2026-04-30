@@ -19,7 +19,7 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 | 1.3 | Implementation | ✅ | daemon + DB schema + 7 callsites wired |
 | 1.4 | Verification | ✅ | unit + smoke; live-env smoke deferred |
 | 1.5 | Migration safety | ✅ | flag default `bash`; flip after burn-in |
-| 2.1 | Persist failureTracker | ⏸ | unblocked by Phase 1 |
+| 2.1 | Persist failureTracker | ✅ | `agent_failures` table + DB-backed accessors |
 | 2.2 | `process.kill(pid, 0)` standardization | ⏸ | mechanical |
 | 2.3 | tmux `pane-died` hook | ⏸ | wait until daemon is default |
 | 2.4 | Watchdog SIGTERM handler | ✅ | graceful SIGINT/SIGTERM shutdown |
@@ -104,14 +104,14 @@ A breadth-first parallel swarm against this codebase is the wrong move because (
 
 These get easier or become trivial once the daemon owns lifecycle. Recommended order: **2.4 → 2.1 → 2.2 → 2.3** (cheapest correctness fix first; defer the hook until after persistent state).
 
-### 2.1 Persist `failureTracker` to SQLite ⏸
+### 2.1 Persist `failureTracker` to SQLite ✅
 Two parallel in-memory `Map`s — `watchdog.ts:62` and `spawn-recovery.ts:51` — both wipe on process restart, so repeat-failing agents get re-spawned forever after a crash.
 
-- [ ] Schema: `agent_failures (agent_id PK, agent_name, failure_count, last_failure_at, last_spawned_at, backoff_until, escalation_level, death_type)`. Add to migrate() in `db.ts`.
-- [ ] DB API on `BrainDB`: `failure_get(agent_id)`, `failure_record(agent_id, fields)`, `failure_clear(agent_id)`.
-- [ ] Replace `failureTracker = new Map<string, AgentFailureRecord>()` in `watchdog.ts:62` with DB-backed accessors.
-- [ ] Replace `failureRecords = new Map<string, SpawnFailureRecord>()` in `spawn-recovery.ts:51` with same.
-- [ ] Verify: kill watchdog mid-flight while a failure record exists; restart; confirm record survives and backoff still applies.
+- [x] Schema: `agent_failures (agent_id PK, agent_name, failure_count, last_failure_at, last_spawned_at, backoff_until, escalation_level, death_type)`. Add to migrate() in `db.ts`.
+- [x] DB API on `BrainDB`: `failure_get(agent_id)`, `failure_record(agent_id, fields)`, `failure_clear(agent_id)`.
+- [x] Replace `failureTracker = new Map<string, AgentFailureRecord>()` in `watchdog.ts:62` with DB-backed accessors.
+- [x] Replace `failureRecords = new Map<string, SpawnFailureRecord>()` in `spawn-recovery.ts:51` with same.
+- [x] Verify: kill watchdog mid-flight while a failure record exists; restart; confirm record survives and backoff still applies.
 - **Estimate:** ~150 lines, half-day. **Risk:** low — the in-memory Map API is small.
 
 ### 2.2 Standardize liveness on `process.kill(pid, 0)` ⏸

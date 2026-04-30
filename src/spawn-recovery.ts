@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { BrainDB } from './db.js';
+import type { AgentFailureRecord as PersistedAgentFailure, BrainDB } from './db.js';
 import { createServerLogger } from './server-log.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -46,9 +46,6 @@ export interface SpawnFailureRecord {
   escalationLevel: number; // 0 = normal, 1 = warned, 2 = escalated
   deathType: DeathType;
 }
-
-// In-memory store for spawn failure records (survives across spawns)
-const failureRecords = new Map<string, SpawnFailureRecord>();
 
 // ── Error Detection ───────────────────────────────────────────────────────────
 
@@ -168,12 +165,18 @@ async function backoffSleep(attempt: number): Promise<void> {
  * Get or create a failure record for an agent.
  */
 export function getOrCreateFailureRecord(
+  db: BrainDB,
   agentId: string,
   agentName: string,
   room: string,
 ): SpawnFailureRecord {
-  if (!failureRecords.has(agentId)) {
-    failureRecords.set(agentId, {
+  const row = db.failure_get(agentId);
+  if (!row) {
+    db.failure_record(agentId, {
+      agent_name: agentName,
+      death_type: 'unknown',
+    });
+    return {
       agentId,
       agentName,
       room,
@@ -181,15 +184,16 @@ export function getOrCreateFailureRecord(
       backoffUntil: 0,
       escalationLevel: 0,
       deathType: 'unknown',
-    });
+    };
   }
-  return failureRecords.get(agentId)!;
+  return failureRecordFromRow(row, room);
 }
 
 /**
  * Record a failed spawn attempt.
  */
 export function recordSpawnFailure(
+  db: BrainDB,
   record: SpawnFailureRecord,
   attempt: number,
   error?: string,
@@ -218,13 +222,22 @@ export function recordSpawnFailure(
   } else if (record.attempts.length >= 2) {
     record.escalationLevel = 1; // warned
   }
+
+  db.failure_record(record.agentId, {
+    agent_name: record.agentName,
+    failure_count: record.attempts.length,
+    last_failure_at: record.attempts[record.attempts.length - 1].timestamp,
+    backoff_until: record.backoffUntil,
+    escalation_level: record.escalationLevel,
+    death_type: record.deathType,
+  });
 }
 
 /**
  * Clear failure record on successful spawn.
  */
-export function clearFailureRecord(agentId: string): void {
-  failureRecords.delete(agentId);
+export function clearFailureRecord(db: BrainDB, agentId: string): void {
+  db.failure_clear(agentId);
 }
 
 export function shouldStopRetrying(record: SpawnFailureRecord): boolean {
@@ -233,6 +246,25 @@ export function shouldStopRetrying(record: SpawnFailureRecord): boolean {
 
 export function shouldEscalate(record: SpawnFailureRecord): boolean {
   return record.escalationLevel >= 2;
+}
+
+function failureRecordFromRow(row: PersistedAgentFailure, room: string): SpawnFailureRecord {
+  const attempts: SpawnAttempt[] = [];
+  for (let i = 0; i < row.failure_count; i++) {
+    attempts.push({
+      attempt: i + 1,
+      timestamp: row.last_failure_at,
+    });
+  }
+  return {
+    agentId: row.agent_id,
+    agentName: row.agent_name,
+    room,
+    attempts,
+    backoffUntil: row.backoff_until,
+    escalationLevel: row.escalation_level,
+    deathType: row.death_type,
+  };
 }
 
 // ── Crash Recovery ─────────────────────────────────────────────────────────────
@@ -547,7 +579,7 @@ export async function spawnWithRecovery(
   logFile: string,
   onBeforeSpawn?: () => void,
 ): Promise<SpawnResult> {
-  const record = getOrCreateFailureRecord(agentId, agentName, room);
+  const record = getOrCreateFailureRecord(db, agentId, agentName, room);
   const ts = Date.now();
   const pidFile = join(tmpdir(), `brain-pid-${ts}-${agentName}.txt`);
   const exitCodeFile = join(tmpdir(), `brain-exit-${ts}-${agentName}.txt`);
@@ -625,7 +657,7 @@ export async function spawnWithRecovery(
           proc.removeListener('exit', onFinalExit);
         }
         // Success — clear failure record
-        clearFailureRecord(agentId);
+        clearFailureRecord(db, agentId);
         return { success: true, pid: spawnedPid!, attempt };
       }
 
@@ -633,7 +665,7 @@ export async function spawnWithRecovery(
 
       const errMsg = startup.error ?? `exited with code ${startup.exitCode ?? -1}`;
       const classified = classifyProcessFailure(errMsg, startup.exitCode);
-      recordSpawnFailure(record, attempt, classified.message, startup.exitCode);
+      recordSpawnFailure(db, record, attempt, classified.message, startup.exitCode);
 
       if (!classified.recoverable) {
         try { unlinkSync(watcherFile); } catch { /* best effort */ }
@@ -654,7 +686,7 @@ export async function spawnWithRecovery(
       }
     } catch (err: any) {
       const classified = classifyError(err);
-      recordSpawnFailure(record, attempt, classified.message);
+      recordSpawnFailure(db, record, attempt, classified.message);
 
       if (!classified.recoverable) {
         // Permanent failure — don't retry

@@ -230,6 +230,21 @@ export interface SpawnTimingTrend {
   avg_spawn_duration_ms: number | null;
 }
 
+// ── Agent Failure Tracking ──
+
+export type AgentFailureDeathType = 'spawn_failure' | 'crash' | 'unknown';
+
+export interface AgentFailureRecord {
+  agent_id: string;
+  agent_name: string;
+  failure_count: number;
+  last_failure_at: number;
+  last_spawned_at: number | null;
+  backoff_until: number;
+  escalation_level: number;
+  death_type: AgentFailureDeathType;
+}
+
 // ── Context Ledger ──
 
 export type ContextEntryType = 'action' | 'discovery' | 'decision' | 'error' | 'file_change' | 'checkpoint';
@@ -542,6 +557,19 @@ export class BrainDB {
     `);
     try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_spawn_metrics_room ON spawn_metrics(room)"); } catch { /* already exists */ }
     try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_spawn_metrics_session ON spawn_metrics(session_id)"); } catch { /* already exists */ }
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_failures (
+        agent_id TEXT PRIMARY KEY,
+        agent_name TEXT NOT NULL,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_failure_at INTEGER NOT NULL DEFAULT 0,
+        last_spawned_at INTEGER,
+        backoff_until INTEGER NOT NULL DEFAULT 0,
+        escalation_level INTEGER NOT NULL DEFAULT 0,
+        death_type TEXT NOT NULL DEFAULT 'unknown'
+      )
+    `);
 
     // Register cosine_similarity function for vector search
     this.db.function('cosine_similarity', { deterministic: true }, (a: unknown, b: unknown) => {
@@ -1714,6 +1742,62 @@ export class BrainDB {
        GROUP BY time_bucket
        ORDER BY time_bucket ASC`
     ).all(room, `-${hours} hours`) as SpawnTimingTrend[];
+  }
+
+  // ── Agent Failure Tracking ──
+
+  failure_get(agentId: string): AgentFailureRecord | null {
+    const row = this.db.prepare(
+      `SELECT * FROM agent_failures WHERE agent_id = ?`,
+    ).get(agentId) as AgentFailureRecord | undefined;
+    return row ?? null;
+  }
+
+  failure_record(
+    agentId: string,
+    fields: Partial<Omit<AgentFailureRecord, 'agent_id'>>,
+  ): AgentFailureRecord {
+    const current = this.failure_get(agentId);
+    const next: AgentFailureRecord = {
+      agent_id: agentId,
+      agent_name: fields.agent_name ?? current?.agent_name ?? agentId,
+      failure_count: fields.failure_count ?? current?.failure_count ?? 0,
+      last_failure_at: fields.last_failure_at ?? current?.last_failure_at ?? 0,
+      last_spawned_at: fields.last_spawned_at ?? current?.last_spawned_at ?? null,
+      backoff_until: fields.backoff_until ?? current?.backoff_until ?? 0,
+      escalation_level: fields.escalation_level ?? current?.escalation_level ?? 0,
+      death_type: fields.death_type ?? current?.death_type ?? 'unknown',
+    };
+
+    this.db.prepare(
+      `INSERT INTO agent_failures (
+         agent_id, agent_name, failure_count, last_failure_at, last_spawned_at,
+         backoff_until, escalation_level, death_type
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         agent_name = excluded.agent_name,
+         failure_count = excluded.failure_count,
+         last_failure_at = excluded.last_failure_at,
+         last_spawned_at = excluded.last_spawned_at,
+         backoff_until = excluded.backoff_until,
+         escalation_level = excluded.escalation_level,
+         death_type = excluded.death_type`,
+    ).run(
+      next.agent_id,
+      next.agent_name,
+      next.failure_count,
+      next.last_failure_at,
+      next.last_spawned_at,
+      next.backoff_until,
+      next.escalation_level,
+      next.death_type,
+    );
+
+    return next;
+  }
+
+  failure_clear(agentId: string): void {
+    this.db.prepare(`DELETE FROM agent_failures WHERE agent_id = ?`).run(agentId);
   }
 
   /** Update session resource usage fields (called periodically by watchdog). */

@@ -19,6 +19,32 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SPAWN_TMP_PREFIX } from './constants.js';
 import { agentEnvShellPairs } from './agent-env.js';
+
+// Provider → API-key env var(s) mapping. Pi-ai (and friends) read these
+// from process.env at startup; if none are set, the agent silently fails
+// auth on the first model call and exits with code 0 — which the daemon
+// reads as "pane_closed/done" and the session sits in queued forever.
+// Validate up front so the operator sees an actionable error instead.
+const PROVIDER_ENV_KEYS: Record<string, string[]> = {
+  anthropic: ['ANTHROPIC_API_KEY'],
+  openai: ['OPENAI_API_KEY'],
+  google: ['GOOGLE_API_KEY', 'GEMINI_API_KEY'],
+  openrouter: ['OPENROUTER_API_KEY'],
+  groq: ['GROQ_API_KEY'],
+  mistral: ['MISTRAL_API_KEY'],
+  xai: ['XAI_API_KEY'],
+  cohere: ['COHERE_API_KEY'],
+  deepseek: ['DEEPSEEK_API_KEY'],
+};
+
+function checkProviderCredentials(provider: string): { ok: boolean; missing: string[] } {
+  const keys = PROVIDER_ENV_KEYS[provider.toLowerCase()];
+  if (!keys) return { ok: true, missing: [] }; // unknown provider — let it through, pi will surface its own error
+  for (const k of keys) {
+    if (process.env[k]) return { ok: true, missing: [] };
+  }
+  return { ok: false, missing: keys };
+}
 import { randomUUID } from 'node:crypto';
 import type { ThinkingLevel } from '@mariozechner/pi-agent-core';
 import type { ThinkingBudgets } from '@mariozechner/pi-ai';
@@ -350,6 +376,19 @@ function spawnAgent(
     const piModel = agentModel || 'claude-sonnet-4-5';
     const { provider: piProvider, id: piModelId } = resolvePiModelSpec(piModel);
 
+    const cred = checkProviderCredentials(piProvider);
+    if (!cred.ok) {
+      const errMsg =
+        `pi cannot authenticate: provider="${piProvider}" model="${piModelId}" — ` +
+        `no API key found in env (expected one of: ${cred.missing.join(', ')}). ` +
+        `Set one of those env vars, pick a provider you have credentials for, ` +
+        `or switch to mode="pi-core" (in-process, uses Hermes' configured LLM).`;
+      try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      db.markDone(agentSessionId, -1, true, errMsg);
+      console.error(`${C.red}[conductor] ${errMsg} — skipping ${agentName}${C.reset}`);
+      return agentSessionId;
+    }
+
     // Build the pi command
     // --print = non-interactive, process prompt and exit
     // --no-session = ephemeral (no session file clutter)
@@ -421,9 +460,18 @@ printf '%s\n' "pane_closed" > "$STATE_FILE"
 
   } else if (config.mode === 'py') {
     // ── Python agent mode ──
+    // py uses Anthropic via ANTHROPIC_API_KEY (brain_agent.py doesn't take a provider arg).
+    const cred = checkProviderCredentials('anthropic');
+    if (!cred.ok) {
+      const errMsg =
+        `py agent cannot authenticate: ANTHROPIC_API_KEY not set in env. ` +
+        `Set ANTHROPIC_API_KEY or switch to a different mode.`;
+      db.markDone(agentSessionId, -1, true, errMsg);
+      console.error(`${C.red}[conductor] ${errMsg} — skipping ${agentName}${C.reset}`);
+      return agentSessionId;
+    }
     envParts.push(`BRAIN_TASK=${sh(agentTask)}`);
     envParts.push(`BRAIN_MODEL=${sh(agentModel)}`);
-    // ANTHROPIC_API_KEY already included by agentEnvShellPairs when present.
 
     const pyScript = join(agentsDir(), 'brain_agent.py');
     const pyVenv = join(agentsDir(), '.venv', 'bin', 'python3');

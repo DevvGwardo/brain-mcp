@@ -22,6 +22,7 @@ import {
   BACKOFF_MAX_MS,
   ESCALATION_THRESHOLD,
   MAX_RESPAWN_ATTEMPTS,
+  STARTUP_GRACE_BY_RUNTIME,
   STARTUP_GRACE_MS,
 } from './constants.js';
 
@@ -30,6 +31,7 @@ import {
 const MAX_RETRIES = 3;
 
 export type DeathType = 'spawn_failure' | 'crash' | 'unknown';
+export type AgentRuntime = keyof typeof STARTUP_GRACE_BY_RUNTIME;
 
 export interface SpawnAttempt {
   attempt: number;
@@ -490,6 +492,7 @@ export function waitForStartup(
   pid: number,
   logFile: string,
   exitCodeFile: string,
+  runtime: AgentRuntime = 'py',
 ): Promise<StartupCheckResult> {
   return new Promise((resolve) => {
     let settled = false;
@@ -547,11 +550,23 @@ export function waitForStartup(
         exitCode: failure.exitCode ?? earlyExitCode ?? -1,
         error: failure.error ?? `exited with code ${failure.exitCode ?? earlyExitCode ?? -1}`,
       });
-    }, STARTUP_GRACE_MS);
+    }, startupGraceMs(runtime));
 
     proc.once('error', onError);
     proc.once('exit', onExit);
   });
+}
+
+function startupGraceMs(runtime: AgentRuntime): number {
+  return STARTUP_GRACE_BY_RUNTIME[runtime] ?? STARTUP_GRACE_MS;
+}
+
+function inferRuntimeFromCommand(spawnCmd: string): AgentRuntime {
+  if (/\bclaude\b/.test(spawnCmd)) return 'claude';
+  if (/\bhermes\b/.test(spawnCmd)) return 'hermes';
+  if (/\bcodex\b/.test(spawnCmd)) return 'codex';
+  if (/\bpi\b/.test(spawnCmd)) return 'pi';
+  return 'py';
 }
 
 /**
@@ -572,6 +587,7 @@ export async function spawnWithRecovery(
   spawnCmd: string,
   logFile: string,
   onBeforeSpawn?: () => void,
+  runtime: AgentRuntime = inferRuntimeFromCommand(spawnCmd),
 ): Promise<SpawnResult> {
   const record = getOrCreateFailureRecord(db, agentId, agentName, room);
   const ts = Date.now();
@@ -637,7 +653,7 @@ export async function spawnWithRecovery(
       };
       proc.on('exit', onFinalExit);
 
-      const startup = await waitForStartup(db, agentId, proc, spawnedPid, logFile, exitCodeFile);
+      const startup = await waitForStartup(db, agentId, proc, spawnedPid, logFile, exitCodeFile, runtime);
       if (startup.started) {
         startupConfirmed = true;
         if (proc.exitCode !== null) {

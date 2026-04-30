@@ -8,3 +8,10 @@ export const BACKOFF_BASE_SEC = 15;
 export const BACKOFF_MAX_SEC = 300;
 
 export const STARTUP_GRACE_MS = 1500;
+export const STARTUP_GRACE_BY_RUNTIME = {
+  claude: 8000,
+  hermes: 5000,
+  codex: 8000,
+  pi: 1500,
+  py: 1500,
+} as const;

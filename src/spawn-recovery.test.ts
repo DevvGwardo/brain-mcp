@@ -172,6 +172,24 @@ test('waitForStartup treats live process after grace as started', async () => {
   });
 });
 
+test('waitForStartup uses per-runtime startup grace', async () => {
+  await withDb(async (db, dir) => {
+    db.registerSession('worker', 'room-a', undefined, 'startup-claude');
+    const proc = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 2200)'], { stdio: 'ignore' });
+    const result = await waitForStartup(
+      db,
+      'startup-claude',
+      proc,
+      proc.pid!,
+      join(dir, 'claude.log'),
+      join(dir, 'claude.exit'),
+      'claude',
+    );
+    assert(!result.started, 'claude grace waits through early clean exit');
+    assert(result.exitCode === 0, 'reports early claude exit code');
+  });
+});
+
 test('buildRecoveryContext and formatRecoveryReport summarize persisted state', () => withDb((db) => {
   db.registerSession('worker', 'room-a', JSON.stringify({ role: 'test' }), 'ctx-agent');
   db.claim('resource-a', 'ctx-agent', 'worker', 'room-a');
@@ -236,12 +254,13 @@ test('spawnWithRecovery confirms a live process and clears failures', async () =
       'live-agent',
       'worker',
       'do live task',
-      `${process.execPath} -e "setTimeout(() => process.exit(0), 2200)"`,
+      'sleep 5',
       logFile,
     );
     assert(result.success, 'returns successful spawn result');
     assert(typeof result.pid === 'number', 'returns spawned pid');
     assert(db.failure_get('live-agent') === null, 'clears previous failure on success');
+    try { process.kill(-result.pid!, 'SIGTERM'); } catch { /* best effort */ }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   });
 });

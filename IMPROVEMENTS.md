@@ -27,7 +27,7 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 | 3.2 | `execFile` migration | ⏸ | parallelizable |
 | 3.3 | Env allowlist | ⏸ | parallelizable |
 | 3.4 | `mkdtemp` 0o700 | ⏸ | parallelizable |
-| 3.5 | Per-runtime `STARTUP_GRACE_MS` | ⏸ | quick |
+| 3.5 | Per-runtime `STARTUP_GRACE_MS` | ✅ | runtime-specific startup grace |
 | 4.1 | `AgentRuntime` interface | ⏸ | wait until Phase 1 burned in + bash deleted |
 | 4.2 | `index.ts` decomposition | ⏸ | mechanical, churn-heavy |
 | 4.3 | Tmux runtime abstraction | ⏸ | depends on 4.1 |
@@ -173,11 +173,11 @@ Predictable `/tmp/brain-watch-${ts}-${name}.sh` paths in shared `/tmp` is a syml
 - [ ] Update `cleanupStaleTempFiles` patterns in `watchdog.ts` to match new naming.
 - [ ] Verify: spawn → confirm dir mode 0o700 and isolated.
 
-### 3.5 Per-runtime `STARTUP_GRACE_MS` ⏸
+### 3.5 Per-runtime `STARTUP_GRACE_MS` ✅
 Currently hardcoded `1500` in `spawn-recovery.ts:27`. Claude needs ~5–10s to print first marker; pi/py <1s. Mismatch causes false-positive crash detection on slow Claude boot.
-- [ ] Add `STARTUP_GRACE_BY_RUNTIME = { claude: 8000, hermes: 5000, codex: 8000, pi: 1500, py: 1500 }`.
-- [ ] `waitForStartup` accepts a runtime and uses the appropriate grace.
-- [ ] Verify: existing spawn-recovery tests still pass (when 5.1 lands).
+- [x] Add `STARTUP_GRACE_BY_RUNTIME = { claude: 8000, hermes: 5000, codex: 8000, pi: 1500, py: 1500 }`.
+- [x] `waitForStartup` accepts a runtime and uses the appropriate grace.
+- [x] Verify: existing spawn-recovery tests still pass (when 5.1 lands).
 
 ## Phase 4 — Architecture (large, sequential)
 

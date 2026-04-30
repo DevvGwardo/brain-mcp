@@ -2185,6 +2185,56 @@ export class BrainDB {
     return row?.pid ?? null;
   }
 
+  daemonLock_record(name: string): { pid: number; acquired_at: string } | null {
+    const row = this.db.prepare(
+      `SELECT pid, acquired_at FROM daemon_locks WHERE name = ?`,
+    ).get(name) as { pid: number; acquired_at: string } | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Phase 6 burn-in helper: counts of pane_watches by status, with a
+   * time window for terminal rows so /status doesn't drown in old data.
+   */
+  paneWatch_statusCounts(terminalLookbackHours = 1): {
+    ready_wait: number;
+    running: number;
+    terminal_pane_closed: number;
+    terminal_timeout: number;
+    terminal_watcher_error: number;
+  } {
+    const row = this.db.prepare(
+      `SELECT
+         SUM(CASE WHEN status = 'ready_wait' THEN 1 ELSE 0 END) AS ready_wait,
+         SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+         SUM(CASE WHEN status = 'terminal' AND terminal_state = 'pane_closed' AND terminal_at > datetime('now', ?) THEN 1 ELSE 0 END) AS terminal_pane_closed,
+         SUM(CASE WHEN status = 'terminal' AND terminal_state = 'timeout' AND terminal_at > datetime('now', ?) THEN 1 ELSE 0 END) AS terminal_timeout,
+         SUM(CASE WHEN status = 'terminal' AND terminal_state = 'watcher_error' AND terminal_at > datetime('now', ?) THEN 1 ELSE 0 END) AS terminal_watcher_error
+       FROM pane_watches`,
+    ).get(`-${terminalLookbackHours} hours`, `-${terminalLookbackHours} hours`, `-${terminalLookbackHours} hours`) as Record<string, number | null>;
+    return {
+      ready_wait: row.ready_wait ?? 0,
+      running: row.running ?? 0,
+      terminal_pane_closed: row.terminal_pane_closed ?? 0,
+      terminal_timeout: row.terminal_timeout ?? 0,
+      terminal_watcher_error: row.terminal_watcher_error ?? 0,
+    };
+  }
+
+  /**
+   * Detached tmux sessions (brain-XXX) with at least one non-terminal watch.
+   * Daemon kills empty detached sessions automatically (Phase 6.2);
+   * this view shows which ones are still in use.
+   */
+  paneWatch_activeDetachedSessions(): Array<{ name: string; active_watches: number }> {
+    return this.db.prepare(
+      `SELECT tmux_session_name AS name, COUNT(*) AS active_watches
+       FROM pane_watches
+       WHERE status != 'terminal' AND tmux_session_name IS NOT NULL
+       GROUP BY tmux_session_name`,
+    ).all() as Array<{ name: string; active_watches: number }>;
+  }
+
   close(): void {
     this._stmtCache.clear();
     this.db.close();

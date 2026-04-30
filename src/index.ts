@@ -550,9 +550,10 @@ server.tool(
 - spawn_history: individual spawn records
 - spawn_trend: hourly time-series of spawn activity over the last N hours
 - model_metrics: performance breakdown by model
-- session_resources: current resource usage for active sessions`,
+- session_resources: current resource usage for active sessions
+- daemon_summary: spawn count + success rate broken down by transport (tmux-bash | tmux-daemon | headless) — use during BRAIN_WATCHER_MODE=daemon burn-in`,
   {
-    view: z.enum(['summary', 'history', 'spawn_summary', 'spawn_history', 'spawn_trend', 'model_metrics', 'session_resources'])
+    view: z.enum(['summary', 'history', 'spawn_summary', 'spawn_history', 'spawn_trend', 'model_metrics', 'session_resources', 'daemon_summary'])
       .optional().describe('Which metrics view to return (default: summary)'),
     agent: z.string().optional().describe('Filter metrics to a specific agent name'),
     limit: cNum().optional().describe('Max records for history views (default: 50)'),
@@ -584,6 +585,11 @@ server.tool(
           last_heartbeat: s.last_heartbeat,
         })));
       }
+      case 'daemon_summary':
+        // Phase 5.3 / 6 view — daemon-vs-bash latency + success-rate breakdown.
+        // Useful during burn-in to confirm the daemon path is being exercised
+        // and to compare it against the legacy bash watcher.
+        return reply(db.getDaemonSummary(room));
       default: {
         // Default summary: agent task metrics + spawn metrics side by side
         const agentMetrics = db.getMetricsSummary(room);
@@ -621,6 +627,55 @@ server.tool(
       files_changed: files_changed ?? 0, outcome: outcome ?? 'success',
     });
     return reply({ ok: 1, agent_name, outcome: outcome ?? 'success' });
+  }
+);
+
+// ═══════════════════════════════════════
+//  Agent watcher daemon health
+// ═══════════════════════════════════════
+
+server.tool(
+  'brain_daemon_status',
+  `At-a-glance health check for the agent-watcher daemon. Returns:
+- mode: 'daemon' or 'bash' (current BRAIN_WATCHER_MODE)
+- daemon: { running, pid, alive, lock_acquired_at } — is the daemon process alive?
+- watches: { ready_wait, running, terminal_pane_closed, terminal_timeout, terminal_watcher_error } — counts by status (last 1h for terminal)
+- detached_sessions: brain-* tmux sessions with active watches (informational; daemon kills empty ones automatically unless BRAIN_KEEP_DETACHED_SESSION=1)
+- defaults: BRAIN_DEFAULT_AGENT_TIMEOUT (effective seconds)
+
+Use during burn-in to confirm daemon is the active spawn-watcher.`,
+  {},
+  async () => {
+    ensureSession();
+    const mode = process.env.BRAIN_WATCHER_MODE === 'daemon' ? 'daemon' : 'bash';
+    const lockRow = db.daemonLock_record('agent-watcher');
+    let alive = false;
+    if (lockRow) {
+      try { process.kill(lockRow.pid, 0); alive = true; } catch { alive = false; }
+    }
+    const counts = db.paneWatch_statusCounts(1);
+    const detachedSessions = db.paneWatch_activeDetachedSessions();
+    return reply({
+      mode,
+      daemon: {
+        running: alive,
+        pid: lockRow?.pid ?? null,
+        alive,
+        lock_acquired_at: lockRow?.acquired_at ?? null,
+      },
+      watches: {
+        ready_wait: counts.ready_wait,
+        running: counts.running,
+        terminal_pane_closed_1h: counts.terminal_pane_closed,
+        terminal_timeout_1h: counts.terminal_timeout,
+        terminal_watcher_error_1h: counts.terminal_watcher_error,
+      },
+      detached_sessions: detachedSessions,
+      defaults: {
+        BRAIN_DEFAULT_AGENT_TIMEOUT: defaultAgentTimeoutSec(),
+        BRAIN_KEEP_DETACHED_SESSION: process.env.BRAIN_KEEP_DETACHED_SESSION === '1',
+      },
+    });
   }
 );
 

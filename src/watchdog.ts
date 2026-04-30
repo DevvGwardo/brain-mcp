@@ -250,14 +250,42 @@ async function attemptRespawn(
 const db = new BrainDB(dbPath);
 let lastStaleAlerts: string[] = [];
 let cleanupCycleCounter = 0;
+let stopping = false;
+let wakeLoop: (() => void) | null = null;
+
+function stop(signal: NodeJS.Signals) {
+  if (stopping) return;
+  stopping = true;
+  log(`Received ${signal}; shutting down watchdog`);
+  wakeLoop?.();
+  try { db.close(); } catch { /* best effort */ }
+}
+
+process.on('SIGINT', stop);
+process.on('SIGTERM', stop);
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      wakeLoop = null;
+      resolve();
+    }, ms);
+    wakeLoop = () => {
+      clearTimeout(timer);
+      wakeLoop = null;
+      resolve();
+    };
+  });
+}
 
 async function main() {
   log(`Starting enhanced watchdog for room: ${room}, db: ${dbPath}`);
   log(`Thresholds: spawn_failure<${SPAWN_FAILURE_THRESHOLD_SEC}s, crash<${CRASH_THRESHOLD_SEC}s`);
 
-  while (true) {
+  while (!stopping) {
     try {
-      await new Promise(r => setTimeout(r, pollInterval));
+      await sleep(pollInterval);
+      if (stopping) break;
 
       const agents = db.getAgentHealth(room);
       const conductorAgent = agents.find(a => a.name.includes('conductor') || a.name === 'conductor');
@@ -409,6 +437,8 @@ async function main() {
       log(`Error in watchdog loop: ${err}`);
     }
   }
+
+  log('Watchdog stopped');
 }
 
 main().catch(err => {

@@ -42,6 +42,7 @@ function makeWatch(overrides: Partial<PaneWatch> = {}): PaneWatch {
     paste_completed_at: null,
     terminal_at: null,
     last_polled_at: null,
+    tmux_session_name: null,
     ...overrides,
   };
 }

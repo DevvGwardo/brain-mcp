@@ -20,3 +20,17 @@ export const STARTUP_GRACE_BY_RUNTIME = {
 // All bash watchers + spawn-recovery wrappers create one of these and
 // place their files inside instead of using predictable /tmp paths.
 export const SPAWN_TMP_PREFIX = 'brain-spawn-';
+
+// Default ceiling for any spawned agent's lifetime. 0 = no timeout (the
+// previous behavior). Defensive default: 30 minutes prevents forgotten
+// interactive panes (e.g. pi without --print, claude that didn't /exit)
+// from sitting in tmux indefinitely. Override per-spawn via the
+// timeout/agentTimeout argument or globally via BRAIN_DEFAULT_AGENT_TIMEOUT.
+export const DEFAULT_AGENT_TIMEOUT_SEC = 1800;
+
+export function defaultAgentTimeoutSec(): number {
+  const raw = process.env.BRAIN_DEFAULT_AGENT_TIMEOUT;
+  if (!raw) return DEFAULT_AGENT_TIMEOUT_SEC;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_AGENT_TIMEOUT_SEC;
+}

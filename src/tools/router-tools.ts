@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { TaskRouter } from '../router.js';
 import type { BrainDB } from '../db.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from '../agent-watcher.js';
-import { SPAWN_TMP_PREFIX } from '../constants.js';
+import { SPAWN_TMP_PREFIX, defaultAgentTimeoutSec } from '../constants.js';
 import { agentEnvShellPairs } from '../agent-env.js';
 import { tmux, tmuxTry } from '../tmux-runtime.js';
 
@@ -124,7 +124,7 @@ Use this before brain_wake to auto-select the best model for the job.`,
         }
       }
       const isHeadless = spawnLayout === 'headless';
-      const agentTimeout = timeoutSec ?? (isHeadless ? 1800 : 3600);
+      const agentTimeout = timeoutSec ?? defaultAgentTimeoutSec();
       const workspacePath = prepareAgentWorkspace(room, agentName, isolation || 'shared');
 
       // Auto-route: pick the best model based on task complexity + metrics

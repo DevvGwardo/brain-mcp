@@ -218,6 +218,7 @@ export interface PaneWatch {
   paste_completed_at: string | null;
   terminal_at: string | null;
   last_polled_at: string | null;
+  tmux_session_name: string | null;  // brain-XXX session for daemon to kill once empty; null for shared-session spawns
 }
 
 export interface PaneWatchInsert {
@@ -235,6 +236,7 @@ export interface PaneWatchInsert {
   buffer_name?: string | null;
   cleanup_paths?: string[];
   finalizer_kind?: PaneWatchFinalizer;
+  tmux_session_name?: string | null;
 }
 
 // ── Spawn Metrics ──
@@ -665,6 +667,8 @@ export class BrainDB {
     `);
     try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_pane_watches_status ON pane_watches(status)"); } catch { /* already exists */ }
     try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_pane_watches_session ON pane_watches(session_id)"); } catch { /* already exists */ }
+    try { this.db.exec("ALTER TABLE pane_watches ADD COLUMN tmux_session_name TEXT"); } catch { /* already exists */ }
+    try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_pane_watches_tmux_session ON pane_watches(tmux_session_name)"); } catch { /* already exists */ }
 
     // ── daemon_locks: stale-tolerant single-instance locks for sibling daemons ──
     this.db.exec(`
@@ -2093,8 +2097,9 @@ export class BrainDB {
          pane_id, session_id, status, ready_strategy,
          ready_markers, fallback_markers, max_ready_ticks,
          exit_command, kill_grace_sec, timeout_sec,
-         prompt_path, buffer_name, cleanup_paths, finalizer_kind
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         prompt_path, buffer_name, cleanup_paths, finalizer_kind,
+         tmux_session_name
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       p.pane_id, p.session_id, status, p.ready_strategy ?? 'skip',
       JSON.stringify(p.ready_markers ?? []),
@@ -2104,8 +2109,24 @@ export class BrainDB {
       p.prompt_path ?? null, p.buffer_name ?? null,
       JSON.stringify(p.cleanup_paths ?? []),
       p.finalizer_kind ?? 'reconcile',
+      p.tmux_session_name ?? null,
     );
     return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * Active (non-terminal) watches that share the given tmux session name.
+   * Used by the daemon to decide whether the session is now empty and can
+   * be killed. Excludes the watch row whose id is `excludeId` (the one
+   * just transitioning to terminal).
+   */
+  paneWatch_activeInSession(tmuxSessionName: string, excludeId: number): PaneWatch[] {
+    return this.db.prepare(
+      `SELECT * FROM pane_watches
+       WHERE tmux_session_name = ?
+         AND status != 'terminal'
+         AND id != ?`,
+    ).all(tmuxSessionName, excludeId) as PaneWatch[];
   }
 
   paneWatch_active(): PaneWatch[] {

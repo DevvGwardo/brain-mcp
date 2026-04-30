@@ -234,6 +234,10 @@ function tmuxKillPane(paneId: string): void {
   try { execFileSync('tmux', ['kill-pane', '-t', paneId]); } catch { /* best effort */ }
 }
 
+function tmuxKillSession(sessionName: string): void {
+  try { execFileSync('tmux', ['kill-session', '-t', sessionName]); } catch { /* best effort — already gone */ }
+}
+
 function rmFiles(paths: string[]): void {
   for (const p of paths) {
     if (!p) continue;
@@ -348,6 +352,22 @@ function executeActions(
           }
         } catch (err) {
           log.log(`reconcile failed for session ${watch.session_id}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        // If this watch lived in a brain-mcp-created detached tmux session
+        // (createDetachedTmuxSession), and it's the last non-terminal watch
+        // in that session, the session has only the anchor zsh left — kill
+        // it so detached sessions don't accumulate. Set BRAIN_KEEP_DETACHED_SESSION=1
+        // to opt out (e.g. if you want to attach and review output post-mortem).
+        if (watch.tmux_session_name && process.env.BRAIN_KEEP_DETACHED_SESSION !== '1') {
+          try {
+            const others = db.paneWatch_activeInSession(watch.tmux_session_name, watch.id);
+            if (others.length === 0) {
+              tmuxKillSession(watch.tmux_session_name);
+              log.log(`killed empty detached session ${watch.tmux_session_name}`);
+            }
+          } catch (err) {
+            log.log(`session-cleanup failed for ${watch.tmux_session_name}: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
         break;
       }

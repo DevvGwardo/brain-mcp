@@ -20,7 +20,7 @@ import { renderTool } from './renderer.js';
 import { createServerLogger } from './server-log.js';
 import { registerTmuxSessionRuntime, tmux, tmuxTry } from './tmux-runtime.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from './agent-watcher.js';
-import { SPAWN_TMP_PREFIX } from './constants.js';
+import { SPAWN_TMP_PREFIX, defaultAgentTimeoutSec } from './constants.js';
 import { agentEnvShellPairs } from './agent-env.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
@@ -1516,10 +1516,11 @@ MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_c
             fallback_markers: fallback,
             exit_command: exitCmd,
             kill_grace_sec: 5,
-            timeout_sec: 3600,
+            timeout_sec: defaultAgentTimeoutSec(),
             prompt_path: promptFile,
             buffer_name: bufferName,
             finalizer_kind: 'reconcile',
+            tmux_session_name: detachedTmux?.sessionName ?? null,
           });
         } else {
           const readyPatterns = cliType === 'hermes'
@@ -1534,7 +1535,7 @@ MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_c
 TARGET="${target}"
 PROMPT="${promptFile}"
 BUFFER="${bufferName}"
-ABSOLUTE_TIMEOUT=3600
+ABSOLUTE_TIMEOUT=${defaultAgentTimeoutSec()}
 START_TIME=$(date +%s)
 STATE_FILE="${watcherStateFile}"
 
@@ -2322,7 +2323,7 @@ MiniMax/Claude hint: if the user asks for "tmux_wake", "brain_wake", "claude_cod
       ? createDetachedTmuxSession(agentName, tmuxName)
       : null;
     const isHeadless = spawnLayout === 'headless';
-    const agentTimeout = timeoutSec ?? (isHeadless ? 1800 : 3600);
+    const agentTimeout = timeoutSec ?? defaultAgentTimeoutSec();
     const workspacePath = prepareAgentWorkspace(room, agentName, isolation || 'shared');
 
     // Auto-route: pick the best model based on task complexity + metrics
@@ -2580,6 +2581,7 @@ fi
           prompt_path: promptFile,
           buffer_name: bufferName,
           finalizer_kind: 'reconcile',
+          tmux_session_name: detachedTmux?.sessionName ?? null,
         });
       } else {
         const readyPatterns = cliType === 'hermes'

@@ -17,7 +17,7 @@ import { BrainDB } from '../db.js';
 import { minimalAgentPrompt } from '../autopilot.js';
 import { spawnWithRecovery, savePreSpawnCheckpoint, buildRecoveryContext, classifyError } from '../spawn-recovery.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from '../agent-watcher.js';
-import { SPAWN_TMP_PREFIX } from '../constants.js';
+import { SPAWN_TMP_PREFIX, defaultAgentTimeoutSec } from '../constants.js';
 import { agentEnvShellPairs } from '../agent-env.js';
 import { cNum, cBool, cArr } from './schema-helpers.js';
 
@@ -213,7 +213,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
       const tmuxName = agentName.replace(/[^a-zA-Z0-9_-]/g, '_');
       const spawnLayout = layout || 'horizontal';
       const isHeadless = spawnLayout === 'headless';
-      const agentTimeout = timeoutSec ?? (isHeadless ? 1800 : 3600);
+      const agentTimeout = timeoutSec ?? defaultAgentTimeoutSec();
       const workspacePath = prepareAgentWorkspace(room, agentName, isolation || 'shared');
 
       // Auto-route

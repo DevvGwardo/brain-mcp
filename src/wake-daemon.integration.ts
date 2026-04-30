@@ -249,4 +249,55 @@ await test('daemon kill + respawn: in-flight watches resume from pane_watches', 
   }
 });
 
+await test('detached session: daemon kills it when last watch terminals', async () => {
+  const h = setupHarness();
+  // Simulate brain-mcp's createDetachedTmuxSession: a separate "brain-XXX" session.
+  const detached = `brain-int-detached-${Date.now().toString().slice(-6)}`;
+  execFileSync('tmux', ['new-session', '-d', '-s', detached, '-n', 'brain'], { stdio: 'ignore' });
+  try {
+    const sessionId = 'int-sess-detached';
+    h.db.registerSession('int-agent', '/tmp/int-room', '{}', sessionId);
+    h.db.pulse(sessionId, 'working', 'started');
+
+    const paneId = execFileSync(
+      'tmux',
+      ['split-window', '-h', '-P', '-F', '#{pane_id}', '-t', detached, 'sleep 1'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).toString().trim();
+
+    const watchId = h.db.paneWatch_insert({
+      pane_id: paneId,
+      session_id: sessionId,
+      ready_strategy: 'skip',
+      status: 'running',
+      timeout_sec: 0,
+      finalizer_kind: 'reconcile',
+      tmux_session_name: detached,
+    });
+
+    spawnDaemon(h);
+
+    const finalWatch = await waitFor(() => {
+      const w = h.db.paneWatch_get(watchId);
+      return w && w.status === 'terminal' ? w : null;
+    });
+    assert(!!finalWatch, 'watch transitioned to terminal');
+    assert(finalWatch?.terminal_state === 'pane_closed', 'pane_closed terminal');
+
+    // The daemon should have killed the detached session right after reconcile.
+    const killed = await waitFor(() => {
+      try {
+        execFileSync('tmux', ['has-session', '-t', detached], { stdio: 'ignore' });
+        return null; // still alive
+      } catch {
+        return true; // session is gone
+      }
+    }, 4000, 200);
+    assert(killed === true, 'daemon killed the now-empty detached tmux session');
+  } finally {
+    try { execFileSync('tmux', ['kill-session', '-t', detached], { stdio: 'ignore' }); } catch { /* already dead */ }
+    await teardown(h);
+  }
+});
+
 console.log('\n✅ wake+daemon integration tests complete\n');

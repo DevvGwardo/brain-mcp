@@ -14,6 +14,14 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 - ✅ **Phase 2.x** — all four items done by Codex run #1 (2.1, 2.2, 2.4) and parked (2.3 — pane-died hook, gated on burn-in).
 
 **17 of 22 items shipped.** Remaining are all gated on the daemon burn-in (2.3, 4.1, 4.2, 4.3) or deferred indefinitely (5.4 — pino).
+
+### Phase 6 — Burn-in cleanup follow-ups (2026-04-30)
+
+Items surfaced during real-tmux testing of the daemon. Both shipped:
+
+- ✅ **6.1 Default agent timeout (`DEFAULT_AGENT_TIMEOUT_SEC = 1800`).** All spawn paths default to 30 min if the caller doesn't specify, overridable via `BRAIN_DEFAULT_AGENT_TIMEOUT` env var. Replaces the `1800/3600` magic numbers across `src/index.ts` (×2 sites + 1 bash template), `src/tools/router-tools.ts`, `src/tools/swarm.ts`. Forgotten interactive panes (e.g. operator-spawned `pi` without `--print`) now get killed at 30 min instead of sitting forever.
+- ✅ **6.2 Daemon kills empty detached tmux sessions.** When `brain-mcp` runs from a non-tmux shell, `createDetachedTmuxSession` makes a `brain-XXX` session whose anchor `zsh` pane never exits — sessions accumulated. Now: `pane_watches` carries `tmux_session_name`; daemon's reconcile action checks `paneWatch_activeInSession(name, excludeId)` and `tmux kill-session` when no other non-terminal watches share the session. Opt out via `BRAIN_KEEP_DETACHED_SESSION=1` (e.g. for post-mortem inspection). Wired at the 2 sites in `src/index.ts` that pass `detachedTmux?.sessionName`.
+- 4th integration test case in `src/wake-daemon.integration.ts` covers the new path: synthetic `brain-int-detached-XXX` session, watch reaches terminal, daemon kills the session within 4s. 16/16 PASS.
 - ⏸ **Blocked on burn-in:** 2.3, 4.1, 4.2, 4.3 — wait until `BRAIN_WATCHER_MODE=daemon` runs cleanly in real Hermes workflows for ~2 weeks, then flip default + delete bash in a follow-up PR.
 - ⏸ **Deferred indefinitely:** 5.4 (current 47-line logger is fine).
 

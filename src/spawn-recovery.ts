@@ -17,15 +17,17 @@ import { tmpdir } from 'node:os';
 import type { AgentFailureRecord as PersistedAgentFailure, BrainDB } from './db.js';
 import { createServerLogger } from './server-log.js';
 import { isProcessAlive } from './tmux-runtime.js';
+import {
+  BACKOFF_BASE_MS,
+  BACKOFF_MAX_MS,
+  ESCALATION_THRESHOLD,
+  MAX_RESPAWN_ATTEMPTS,
+  STARTUP_GRACE_MS,
+} from './constants.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const MAX_RETRIES = 3;
-const BACKOFF_BASE_MS = 500;
-const BACKOFF_MAX_MS = 16000;
-const ESCALATION_THRESHOLD = 3; // alerts after 3 consecutive failures
-const MAX_RESPAWN_ATTEMPTS = 5;  // stop retrying after 5
-const STARTUP_GRACE_MS = 1500;
 
 export type DeathType = 'spawn_failure' | 'crash' | 'unknown';
 

@@ -23,7 +23,7 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 | 2.2 | `process.kill(pid, 0)` standardization | ✅ | shared helper in `tmux-runtime.ts` |
 | 2.3 | tmux `pane-died` hook | ⏸ | wait until daemon is default |
 | 2.4 | Watchdog SIGTERM handler | ✅ | graceful SIGINT/SIGTERM shutdown |
-| 3.1 | `src/constants.ts` | ⏸ | needs 2.1 done first (constants will move) |
+| 3.1 | `src/constants.ts` | ✅ | shared retry/backoff constants |
 | 3.2 | `execFile` migration | ⏸ | parallelizable |
 | 3.3 | Env allowlist | ⏸ | parallelizable |
 | 3.4 | `mkdtemp` 0o700 | ⏸ | parallelizable |
@@ -146,10 +146,10 @@ Daemon registers `tmux set-hook pane-died "run-shell '...'"` once; the hook writ
 
 Mechanical and isolated — these can run in parallel via subagents once Phase 1+2 stabilize. Each item is a single PR.
 
-### 3.1 Extract `src/constants.ts` ⏸
-- [ ] New file `src/constants.ts` exporting `MAX_RESPAWN_ATTEMPTS`, `ESCALATION_THRESHOLD`, `BACKOFF_BASE_MS`, `BACKOFF_BASE_SEC`, `BACKOFF_MAX_*`, `STARTUP_GRACE_MS`.
-- [ ] Migrate imports in `watchdog.ts` and `spawn-recovery.ts`. Reconcile drifted values (`BACKOFF_BASE_SEC=15` vs `BACKOFF_BASE_MS=500` represent different windows — pick the right one for each call site).
-- [ ] Verify: tsc clean; agent backoff behavior unchanged in the smoke.
+### 3.1 Extract `src/constants.ts` ✅
+- [x] New file `src/constants.ts` exporting `MAX_RESPAWN_ATTEMPTS`, `ESCALATION_THRESHOLD`, `BACKOFF_BASE_MS`, `BACKOFF_BASE_SEC`, `BACKOFF_MAX_*`, `STARTUP_GRACE_MS`.
+- [x] Migrate imports in `watchdog.ts` and `spawn-recovery.ts`. Reconcile drifted values (`BACKOFF_BASE_SEC=15` vs `BACKOFF_BASE_MS=500` represent different windows — pick the right one for each call site).
+- [x] Verify: tsc clean; agent backoff behavior unchanged in the smoke.
 
 ### 3.2 Replace `execSync` with `execFile` everywhere ⏸
 ~50 callsites, mostly tmux invocations. Eliminates shell injection risk and unblocks the event loop.

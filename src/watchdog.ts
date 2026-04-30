@@ -24,6 +24,12 @@ import {
 } from './spawn-recovery.js';
 import { createServerLogger } from './server-log.js';
 import { getTmuxPanePid, isProcessAlive, isTmuxTargetAlive, readTmuxTargetFromSession } from './tmux-runtime.js';
+import {
+  BACKOFF_BASE_SEC,
+  BACKOFF_MAX_SEC,
+  ESCALATION_THRESHOLD,
+  MAX_RESPAWN_ATTEMPTS,
+} from './constants.js';
 
 const dbPath = process.env.BRAIN_DB_PATH || `${process.env.HOME}/.claude/brain/brain.db`;
 const room = process.env.BRAIN_ROOM || process.cwd();
@@ -34,10 +40,6 @@ const watchdogLog = createServerLogger({ component: 'watchdog', room });
 const SPAWN_FAILURE_THRESHOLD_SEC = 30;  // Agent died within 30s of creation → spawn failure
 const CRASH_THRESHOLD_SEC = 120;          // Agent died within 120s → crash (not spawn failure)
 const VERY_STALE_THRESHOLD_SEC = 300;     // 5 minutes — prune territory
-const MAX_RESPAWN_ATTEMPTS = 5;
-const ESCALATION_THRESHOLD = 3;            // Escalate after 3 failures
-const BACKOFF_BASE_SEC = 15;              // Exponential backoff base
-const BACKOFF_MAX_SEC = 300;              // 5 minute max backoff
 const TEMP_FILE_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 const TEMP_FILE_PATTERNS = [
   'brain-prompt-',

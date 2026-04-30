@@ -9,9 +9,9 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 
 - ✅ **Phase 1** (daemon behind `BRAIN_WATCHER_MODE=daemon`, default still `bash`).
 - ✅ **Phase 2.1, 2.2, 2.4** (failureTracker → SQLite, `process.kill(pid, 0)` standardization, watchdog graceful shutdown).
-- ✅ **Phase 3.1, 3.4, 3.5** (`src/constants.ts`, per-spawn 0o700 tmp dirs, per-runtime `STARTUP_GRACE_MS`).
+- ✅ **Phase 3.1, 3.3, 3.4, 3.5** (`src/constants.ts`, env allowlist, per-spawn 0o700 tmp dirs, per-runtime `STARTUP_GRACE_MS`).
 - ✅ **Phase 5.1** (spawn-recovery unit tests, 97.1% named-function line coverage).
-- ⏭ **Next:** 3.3 (needs allowlist sign-off) → 3.2 → 5.3 → 5.2. ~1 day of work to clear the rest.
+- ⏭ **Next:** 3.2 (execFile migration) → 5.3 (spawn metrics) → 5.2 (integration test). ~half-day of work.
 - ⏸ **Blocked on burn-in:** 2.3, 4.1, 4.2, 4.3 — wait until `BRAIN_WATCHER_MODE=daemon` runs cleanly in real Hermes workflows for ~2 weeks, then flip default + delete bash in a follow-up PR.
 - ⏸ **Deferred indefinitely:** 5.4 (current 47-line logger is fine).
 
@@ -39,7 +39,7 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 | 2.4 | Watchdog SIGTERM handler | ✅ | graceful SIGINT/SIGTERM shutdown |
 | 3.1 | `src/constants.ts` | ✅ | shared retry/backoff constants |
 | 3.2 | `execFile` migration | ⏸ | parallelizable |
-| 3.3 | Env allowlist | ⏸ | parallelizable |
+| 3.3 | Env allowlist | ✅ | `src/agent-env.ts`; closes spawn-recovery `process.env` leak |
 | 3.4 | `mkdtemp` 0o700 | ✅ | per-spawn dirs mode 0o700, cleanup uses freshest-mtime |
 | 3.5 | Per-runtime `STARTUP_GRACE_MS` | ✅ | runtime-specific startup grace |
 | 4.1 | `AgentRuntime` interface | ⏸ | wait until Phase 1 burned in + bash deleted |
@@ -173,12 +173,15 @@ Mechanical and isolated — these can run in parallel via subagents once Phase 1
 - [ ] Migrate the rest mechanically.
 - [ ] Verify: tsc clean, all unit tests pass, smoke flag-off and flag-on.
 
-### 3.3 Explicit env allowlist for spawned agents ⏸
-`spawn-recovery.ts:592` passes full `process.env` to children — leaks unrelated secrets (RAILWAY_TOKEN, GITHUB_TOKEN, etc.) into the agent process tree.
-- [ ] Define `AGENT_ENV_ALLOW = ['PATH','HOME','USER','LANG','LC_*','TERM','BRAIN_*','HERMES_*','ANTHROPIC_API_KEY','OPENAI_API_KEY']` (review with user before locking in).
-- [ ] Helper `buildAgentEnv(extras)` filters `process.env` then merges `extras`.
-- [ ] Update all spawn sites in `spawn-recovery.ts`, `conductor.ts`, `index.ts`, `tools/*.ts` to use the helper.
-- [ ] Verify: spawn an agent in headless mode, dump env, confirm no leaked secrets.
+### 3.3 Explicit env allowlist for spawned agents ✅
+`spawn-recovery.ts:592` was passing full `process.env` to children — leaked deployment secrets (RAILWAY_TOKEN, CF_API_TOKEN, GITHUB_TOKEN, etc.) into every agent.
+- [x] `src/agent-env.ts`: `AGENT_ENV_ALLOW` covers POSIX baseline (PATH/HOME/USER/LOGNAME/SHELL/TMPDIR/LANG/TERM/TERMINFO + LC_*), brain coordination (BRAIN_*), Hermes (HERMES_*, NOUS_API_KEY), AI providers (ANTHROPIC/OPENAI/OPENROUTER), and Node CLI lookup (NPM_CONFIG_PREFIX).
+- [x] `buildAgentEnv(extras, source?)` returns filtered object; `agentEnvShellPairs(extras, source?)` returns shell-quoted `KEY='value'` strings for `env ${parts}` interpolation.
+- [x] Wired at all 7 spawn sites: `spawn-recovery.ts:592` (`env: buildAgentEnv()`), `conductor.ts` envParts, `index.ts` swarm v2 + wake, `tools/router-tools.ts`, `tools/swarm.ts` (×2). One source of truth.
+- [x] Unit tests: `src/agent-env.test.ts` (37 PASS) covers allowlist matches, wildcard prefixes, deny-list (RAILWAY/CF/GITHUB/AWS/GCP/AZURE/DATABASE_URL/STRIPE/NODE_OPTIONS/random), `extras` override, undefined-extras drop, shell-quoting incl. single-quote escape.
+- [x] End-to-end smoke (in-repo): set `RAILWAY_TOKEN`/`CF_API_TOKEN`/`GITHUB_TOKEN` in parent env, spawn `bash -c 'env'` via the helper, confirm none leak; `ANTHROPIC_API_KEY` and `BRAIN_*` pass through.
+- 📝 **Out of scope (follow-up):** tmux server's own env is a separate leak surface — when MCP runs inside a tmux session that already has secrets, panes inherit them regardless of how `tmuxCmd` is constructed. Closing that requires `env -i` reconstruction in command strings (more invasive). Tracked as a future item.
+- 📝 **Out of scope (follow-up):** per-runtime allowlist refinement (e.g., codex doesn't need `ANTHROPIC_API_KEY`). Current allowlist is the union over all CLIs; tightening per-runtime is incremental.
 
 ### 3.4 Secure tmp files via `mkdtemp` 0o700 ✅
 Predictable `/tmp/brain-watch-${ts}-${name}.sh` paths were a symlink-attack surface. Per-spawn `mkdtempSync(SPAWN_TMP_PREFIX)` dirs (mode 0o700) now hold all spawn temp files.

@@ -21,6 +21,7 @@ import { createServerLogger } from './server-log.js';
 import { registerTmuxSessionRuntime } from './tmux-runtime.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from './agent-watcher.js';
 import { SPAWN_TMP_PREFIX } from './constants.js';
+import { agentEnvShellPairs } from './agent-env.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
 // Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
@@ -1376,13 +1377,12 @@ MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_c
         // queued → working (on first agent heartbeat) → done/failed
         db.pulse(agentSessionId, 'queued', `swarm queued; depends_on=${JSON.stringify(agentCfg.depends_on)}`);
 
-        // Build env
-        const childEnvParts = [
-          process.env.BRAIN_DB_PATH ? `BRAIN_DB_PATH=${sh(process.env.BRAIN_DB_PATH)}` : null,
-          `BRAIN_ROOM=${sh(room)}`,
-          `BRAIN_SESSION_ID=${sh(agentSessionId)}`,
-          `BRAIN_SESSION_NAME=${sh(agentName)}`,
-        ].filter(Boolean);
+        // Build env (explicit allowlist + brain-mcp coords)
+        const childEnvParts = agentEnvShellPairs({
+          BRAIN_ROOM: room,
+          BRAIN_SESSION_ID: agentSessionId,
+          BRAIN_SESSION_NAME: agentName,
+        });
 
         const agentModel = agentCfg.model || defaultModel;
         const cliType: 'claude' | 'hermes' | 'other' =
@@ -2341,13 +2341,12 @@ MiniMax/Claude hint: if the user asks for "tmux_wake", "brain_wake", "claude_cod
     );
     db.pulse(agentSessionId, 'queued', 'spawn queued; waiting for first heartbeat');
 
-    // Build env vars for the child
-    const childEnvParts = [
-      process.env.BRAIN_DB_PATH ? `BRAIN_DB_PATH=${sh(process.env.BRAIN_DB_PATH)}` : null,
-      `BRAIN_ROOM=${sh(room)}`,
-      `BRAIN_SESSION_ID=${sh(agentSessionId)}`,
-      `BRAIN_SESSION_NAME=${sh(agentName)}`,
-    ].filter(Boolean);
+    // Build env vars for the child (explicit allowlist + brain-mcp coords)
+    const childEnvParts = agentEnvShellPairs({
+      BRAIN_ROOM: room,
+      BRAIN_SESSION_ID: agentSessionId,
+      BRAIN_SESSION_NAME: agentName,
+    });
 
     // Determine CLI type — BRAIN_DEFAULT_CLI lets hermes auto-spawn hermes agents
     const cliBase = cli || process.env.BRAIN_DEFAULT_CLI || 'claude';

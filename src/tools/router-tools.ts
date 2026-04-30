@@ -8,6 +8,7 @@ import { TaskRouter } from '../router.js';
 import type { BrainDB } from '../db.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from '../agent-watcher.js';
 import { SPAWN_TMP_PREFIX } from '../constants.js';
+import { agentEnvShellPairs } from '../agent-env.js';
 
 // ── Schema helpers ──
 const cNum = () => z.preprocess(
@@ -149,13 +150,12 @@ Use this before brain_wake to auto-select the best model for the job.`,
       );
       db.pulse(agentSessionId, 'queued', 'spawn queued; waiting for first heartbeat');
 
-      // Build env vars for the child
-      const childEnvParts = [
-        process.env.BRAIN_DB_PATH ? `BRAIN_DB_PATH=${sh(process.env.BRAIN_DB_PATH)}` : null,
-        `BRAIN_ROOM=${sh(room)}`,
-        `BRAIN_SESSION_ID=${sh(agentSessionId)}`,
-        `BRAIN_SESSION_NAME=${sh(agentName)}`,
-      ].filter(Boolean);
+      // Build env vars for the child (explicit allowlist + brain-mcp coords)
+      const childEnvParts = agentEnvShellPairs({
+        BRAIN_ROOM: room,
+        BRAIN_SESSION_ID: agentSessionId,
+        BRAIN_SESSION_NAME: agentName,
+      });
 
       // Determine CLI type — BRAIN_DEFAULT_CLI lets hermes auto-spawn hermes agents
       const cliBase = cli || process.env.BRAIN_DEFAULT_CLI || 'claude';

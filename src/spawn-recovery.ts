@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import type { AgentFailureRecord as PersistedAgentFailure, BrainDB } from './db.js';
 import { createServerLogger } from './server-log.js';
 import { isProcessAlive } from './tmux-runtime.js';
+import { buildAgentEnv } from './agent-env.js';
 import {
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
@@ -632,7 +633,7 @@ export async function spawnWithRecovery(
       const proc = spawn('bash', [watcherFile], {
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: process.env,
+        env: buildAgentEnv(),
       });
 
       spawnedPid = proc.pid ?? null;

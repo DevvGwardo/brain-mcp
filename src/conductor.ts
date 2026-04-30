@@ -18,6 +18,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SPAWN_TMP_PREFIX } from './constants.js';
+import { agentEnvShellPairs } from './agent-env.js';
 import { randomUUID } from 'node:crypto';
 import type { ThinkingLevel } from '@mariozechner/pi-agent-core';
 import type { ThinkingBudgets } from '@mariozechner/pi-ai';
@@ -304,26 +305,17 @@ function spawnAgent(
 
   db.pulse(agentSessionId, 'queued', `spawn queued by conductor; waiting for first heartbeat (${modeLabel})`);
 
-  // Build env vars (shared between all modes)
-  const envParts = [
-    process.env.BRAIN_DB_PATH ? `BRAIN_DB_PATH=${sh(process.env.BRAIN_DB_PATH)}` : null,
-    `BRAIN_ROOM=${sh(config.cwd)}`,
-    `BRAIN_SESSION_ID=${sh(agentSessionId)}`,
-    `BRAIN_SESSION_NAME=${sh(agentName)}`,
-  ].filter(Boolean);
+  // Build env vars (shared between all modes) — explicit allowlist + brain-mcp coords.
+  const envParts = agentEnvShellPairs({
+    BRAIN_ROOM: config.cwd,
+    BRAIN_SESSION_ID: agentSessionId,
+    BRAIN_SESSION_NAME: agentName,
+  });
 
   if (config.mode === 'pi') {
     // ── Pi coding agent mode ──
     // Pi has built-in tools (read, write, edit, bash, grep, find, ls)
     // and supports the brain-mcp server for coordination.
-
-    // Forward API keys
-    if (process.env.ANTHROPIC_API_KEY) {
-      envParts.push(`ANTHROPIC_API_KEY=${sh(process.env.ANTHROPIC_API_KEY)}`);
-    }
-    if (process.env.OPENROUTER_API_KEY) {
-      envParts.push(`OPENROUTER_API_KEY=${sh(process.env.OPENROUTER_API_KEY)}`);
-    }
 
     // Build the brain-aware system prompt append
     const fileScope = agent.files?.length
@@ -428,9 +420,7 @@ printf '%s\n' "pane_closed" > "$STATE_FILE"
     // ── Python agent mode ──
     envParts.push(`BRAIN_TASK=${sh(agentTask)}`);
     envParts.push(`BRAIN_MODEL=${sh(agentModel)}`);
-    if (process.env.ANTHROPIC_API_KEY) {
-      envParts.push(`ANTHROPIC_API_KEY=${sh(process.env.ANTHROPIC_API_KEY)}`);
-    }
+    // ANTHROPIC_API_KEY already included by agentEnvShellPairs when present.
 
     const pyScript = join(agentsDir(), 'brain_agent.py');
     const pyVenv = join(agentsDir(), '.venv', 'bin', 'python3');

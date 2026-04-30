@@ -17,6 +17,7 @@ import { minimalAgentPrompt } from '../autopilot.js';
 import { spawnWithRecovery, savePreSpawnCheckpoint, buildRecoveryContext, classifyError } from '../spawn-recovery.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from '../agent-watcher.js';
 import { SPAWN_TMP_PREFIX } from '../constants.js';
+import { agentEnvShellPairs } from '../agent-env.js';
 import { cNum, cBool, cArr } from './schema-helpers.js';
 
 interface SwarmToolsOptions {
@@ -102,12 +103,11 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           );
           db.pulse(agentSessionId, 'queued', `swarm queued; depends_on=${JSON.stringify(agentCfg.depends_on)}`);
 
-          const childEnvParts = [
-            process.env.BRAIN_DB_PATH ? `BRAIN_DB_PATH=${sh(process.env.BRAIN_DB_PATH)}` : null,
-            `BRAIN_ROOM=${sh(room)}`,
-            `BRAIN_SESSION_ID=${sh(agentSessionId)}`,
-            `BRAIN_SESSION_NAME=${sh(agentName)}`,
-          ].filter(Boolean);
+          const childEnvParts = agentEnvShellPairs({
+            BRAIN_ROOM: room,
+            BRAIN_SESSION_ID: agentSessionId,
+            BRAIN_SESSION_NAME: agentName,
+          });
 
           const agentModel = agentCfg.model || defaultModel;
           const cliType: 'claude' | 'hermes' | 'other' =
@@ -238,12 +238,11 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
       );
       db.pulse(agentSessionId, 'queued', 'spawn queued; waiting for first heartbeat');
 
-      const childEnvParts = [
-        process.env.BRAIN_DB_PATH ? `BRAIN_DB_PATH=${sh(process.env.BRAIN_DB_PATH)}` : null,
-        `BRAIN_ROOM=${sh(room)}`,
-        `BRAIN_SESSION_ID=${sh(agentSessionId)}`,
-        `BRAIN_SESSION_NAME=${sh(agentName)}`,
-      ].filter(Boolean);
+      const childEnvParts = agentEnvShellPairs({
+        BRAIN_ROOM: room,
+        BRAIN_SESSION_ID: agentSessionId,
+        BRAIN_SESSION_NAME: agentName,
+      });
 
       const cliBase = cli || process.env.BRAIN_DEFAULT_CLI || 'claude';
       const cliType: 'claude' | 'hermes' | 'other' =

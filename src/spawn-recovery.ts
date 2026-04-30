@@ -11,7 +11,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentFailureRecord as PersistedAgentFailure, BrainDB } from './db.js';
@@ -22,6 +22,7 @@ import {
   BACKOFF_MAX_MS,
   ESCALATION_THRESHOLD,
   MAX_RESPAWN_ATTEMPTS,
+  SPAWN_TMP_PREFIX,
   STARTUP_GRACE_BY_RUNTIME,
   STARTUP_GRACE_MS,
 } from './constants.js';
@@ -590,15 +591,15 @@ export async function spawnWithRecovery(
   runtime: AgentRuntime = inferRuntimeFromCommand(spawnCmd),
 ): Promise<SpawnResult> {
   const record = getOrCreateFailureRecord(db, agentId, agentName, room);
-  const ts = Date.now();
-  const pidFile = join(tmpdir(), `brain-pid-${ts}-${agentName}.txt`);
-  const exitCodeFile = join(tmpdir(), `brain-exit-${ts}-${agentName}.txt`);
+  const tmpDir = mkdtempSync(join(tmpdir(), SPAWN_TMP_PREFIX));
+  const pidFile = join(tmpDir, 'pid');
+  const exitCodeFile = join(tmpDir, 'exit');
 
   // Pre-spawn checkpoint — save what we're trying to do
   savePreSpawnCheckpoint(db, room, agentId, agentName, task);
 
   // Build the wrapper script that captures exit code + PID
-  const watcherFile = join(tmpdir(), `brain-recovery-${ts}-${agentName}.sh`);
+  const watcherFile = join(tmpDir, 'wrapper.sh');
   const wrapperScript = [
     `#!/bin/bash`,
     `set -o pipefail`,
@@ -678,9 +679,7 @@ export async function spawnWithRecovery(
       recordSpawnFailure(db, record, attempt, classified.message, startup.exitCode);
 
       if (!classified.recoverable) {
-        try { unlinkSync(watcherFile); } catch { /* best effort */ }
-        try { unlinkSync(pidFile); } catch { /* best effort */ }
-        try { unlinkSync(exitCodeFile); } catch { /* best effort */ }
+        try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
         return {
           success: false,
           error: classified.message,
@@ -700,9 +699,7 @@ export async function spawnWithRecovery(
 
       if (!classified.recoverable) {
         // Permanent failure — don't retry
-        try { unlinkSync(watcherFile); } catch { /* best effort */ }
-        try { unlinkSync(pidFile); } catch { /* best effort */ }
-        try { unlinkSync(exitCodeFile); } catch { /* best effort */ }
+        try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
 
         return {
           success: false,
@@ -719,7 +716,7 @@ export async function spawnWithRecovery(
   }
 
   // All retries exhausted
-  try { unlinkSync(watcherFile); } catch { /* best effort */ }
+  try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
 
   return {
     success: false,
@@ -772,7 +769,28 @@ export function markGhostSession(db: BrainDB, agentId: string, agentName: string
 
 // ── Cleanup helper ─────────────────────────────────────────────────────────────
 
+/**
+ * For SPAWN_TMP_PREFIX dirs, return the most recent mtime among the dir
+ * itself and its immediate children — long-running agents keep writing to
+ * agent.log without bumping the parent dir's mtime.
+ */
+export function freshestMtime(dir: string, fallback: number): number {
+  let max = fallback;
+  try {
+    const { readdirSync, statSync } = require('node:fs');
+    const { join: j } = require('node:path');
+    for (const name of readdirSync(dir)) {
+      try {
+        const m = statSync(j(dir, name)).mtimeMs;
+        if (m > max) max = m;
+      } catch { /* skip */ }
+    }
+  } catch { /* skip */ }
+  return max;
+}
+
 export function cleanupSpawnTempFiles(patterns: string[] = [
+  SPAWN_TMP_PREFIX,
   'brain-recovery-',
   'brain-pid-',
   'brain-exit-',
@@ -791,8 +809,15 @@ export function cleanupSpawnTempFiles(patterns: string[] = [
       const path = j(tmpdir(), file);
       try {
         const stat = statSync(path);
-        if (now - stat.mtimeMs > maxAge) {
-          unlinkSync(path);
+        const mtimeMs = stat.isDirectory() && file.startsWith(SPAWN_TMP_PREFIX)
+          ? freshestMtime(path, stat.mtimeMs)
+          : stat.mtimeMs;
+        if (now - mtimeMs > maxAge) {
+          if (stat.isDirectory()) {
+            rmSync(path, { recursive: true, force: true });
+          } else {
+            unlinkSync(path);
+          }
           removed++;
         }
       } catch { /* skip */ }

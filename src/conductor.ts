@@ -14,9 +14,10 @@
  */
 
 import { execSync, spawn as spawnProcess } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { SPAWN_TMP_PREFIX } from './constants.js';
 import { randomUUID } from 'node:crypto';
 import type { ThinkingLevel } from '@mariozechner/pi-agent-core';
 import type { ThinkingBudgets } from '@mariozechner/pi-ai';
@@ -263,7 +264,7 @@ function attachTmuxWatcherFinalizer(
         reconcileSessionExit(db, sessionId, 0, 'tmux pane closed');
       }
     } catch { /* best effort */ }
-    try { unlinkSync(stateFile); } catch { /* best effort */ }
+    try { rmSync(dirname(stateFile), { recursive: true, force: true }); } catch { /* best effort */ }
   });
   watcher.unref();
 }
@@ -345,7 +346,8 @@ function spawnAgent(
 
     // Write the task + brain instructions to a temp file for --append-system-prompt
     const ts = Date.now();
-    const systemFile = join(tmpdir(), `brain-sys-${ts}-${tmuxName}.txt`);
+    const tmpDir = mkdtempSync(join(tmpdir(), SPAWN_TMP_PREFIX));
+    const systemFile = join(tmpDir, 'system.txt');
     writeFileSync(systemFile, brainPrompt);
 
     const piModel = agentModel || 'claude-sonnet-4-5';
@@ -396,8 +398,8 @@ function spawnAgent(
       });
     } else {
       // Simple timeout watcher (records exit code on agent exit)
-      const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
-      const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
+      const watcherFile = join(tmpDir, 'watch.sh');
+      const watcherStateFile = join(tmpDir, 'watch.state');
       const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 ABSOLUTE_TIMEOUT=${config.timeout}
@@ -411,13 +413,11 @@ while true; do
     tmux send-keys -t "$TARGET" C-c 2>/dev/null
     sleep 2
     tmux kill-pane -t "$TARGET" 2>/dev/null
-    rm -f "${watcherFile}"
     exit 0
   fi
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
 printf '%s\n' "pane_closed" > "$STATE_FILE"
-rm -f "${watcherFile}" "${systemFile}"
 `;
       writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
       const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
@@ -457,9 +457,9 @@ rm -f "${watcherFile}" "${systemFile}"
       });
     } else {
       // Simple timeout watcher (records exit code on agent exit)
-      const ts = Date.now();
-      const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
-      const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
+      const tmpDir = mkdtempSync(join(tmpdir(), SPAWN_TMP_PREFIX));
+      const watcherFile = join(tmpDir, 'watch.sh');
+      const watcherStateFile = join(tmpDir, 'watch.state');
       const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 ABSOLUTE_TIMEOUT=${config.timeout}
@@ -473,13 +473,11 @@ while true; do
     tmux send-keys -t "$TARGET" C-c 2>/dev/null
     sleep 2
     tmux kill-pane -t "$TARGET" 2>/dev/null
-    rm -f "${watcherFile}"
     exit 0
   fi
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
 printf '%s\n' "pane_closed" > "$STATE_FILE"
-rm -f "${watcherFile}"
 `;
       writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
       const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
@@ -544,7 +542,8 @@ rm -f "${watcherFile}"
 
     // Write prompt to temp file
     const ts = Date.now();
-    const promptFile = join(tmpdir(), `brain-prompt-${ts}-${tmuxName}.txt`);
+    const tmpDir = mkdtempSync(join(tmpdir(), SPAWN_TMP_PREFIX));
+    const promptFile = join(tmpDir, 'prompt.txt');
     const bufferName = `brain-${ts}-${tmuxName}`;
     writeFileSync(promptFile, prompt);
 
@@ -572,8 +571,8 @@ rm -f "${watcherFile}"
       });
     } else {
       // Watcher: wait for ready, paste prompt, wait for exit or timeout
-      const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
-      const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
+      const watcherFile = join(tmpDir, 'watch.sh');
+      const watcherStateFile = join(tmpDir, 'watch.state');
       const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 PROMPT="${promptFile}"
@@ -589,7 +588,6 @@ check_timeout() {
     tmux send-keys -t "$TARGET" "/exit" Enter 2>/dev/null
     sleep 5
     tmux kill-pane -t "$TARGET" 2>/dev/null
-    rm -f "${watcherFile}"
     exit 0
   fi
 }
@@ -622,7 +620,6 @@ while true; do
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
 printf '%s\n' "pane_closed" > "$STATE_FILE"
-rm -f "${watcherFile}"
 `;
       writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
       const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });

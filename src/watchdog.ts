@@ -13,12 +13,13 @@
 import { BrainDB, type AgentFailureDeathType } from './db.js';
 import { randomUUID } from 'node:crypto';
 import { execSync } from 'node:child_process';
-import { existsSync, readdirSync, unlinkSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   buildRecoveryContext,
   formatRecoveryReport,
+  freshestMtime,
   markGhostSession,
   type RecoveryContext,
 } from './spawn-recovery.js';
@@ -29,6 +30,7 @@ import {
   BACKOFF_MAX_SEC,
   ESCALATION_THRESHOLD,
   MAX_RESPAWN_ATTEMPTS,
+  SPAWN_TMP_PREFIX,
 } from './constants.js';
 
 const dbPath = process.env.BRAIN_DB_PATH || `${process.env.HOME}/.claude/brain/brain.db`;
@@ -42,6 +44,7 @@ const CRASH_THRESHOLD_SEC = 120;          // Agent died within 120s → crash (n
 const VERY_STALE_THRESHOLD_SEC = 300;     // 5 minutes — prune territory
 const TEMP_FILE_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 const TEMP_FILE_PATTERNS = [
+  SPAWN_TMP_PREFIX,
   'brain-prompt-',
   'brain-swarm-',
   'brain-watch-',
@@ -81,8 +84,18 @@ function cleanupStaleTempFiles(): number {
       const filePath = join(tmpdir(), file);
       try {
         const stat = statSync(filePath);
-        if (now - stat.mtimeMs > TEMP_FILE_MAX_AGE_MS) {
-          unlinkSync(filePath);
+        // For SPAWN_TMP_PREFIX dirs, use the freshest mtime among children
+        // (long-running agents update logs but not the dir mtime).
+        const mtimeMs =
+          stat.isDirectory() && file.startsWith(SPAWN_TMP_PREFIX)
+            ? freshestMtime(filePath, stat.mtimeMs)
+            : stat.mtimeMs;
+        if (now - mtimeMs > TEMP_FILE_MAX_AGE_MS) {
+          if (stat.isDirectory()) {
+            rmSync(filePath, { recursive: true, force: true });
+          } else {
+            unlinkSync(filePath);
+          }
           removed++;
         }
       } catch { /* skip inaccessible files */ }
@@ -90,6 +103,7 @@ function cleanupStaleTempFiles(): number {
   } catch { /* tmpdir may not exist in some envs */ }
   return removed;
 }
+
 
 // ── Process table checking ───────────────────────────────────────────────────
 

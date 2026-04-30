@@ -15,3 +15,8 @@ export const STARTUP_GRACE_BY_RUNTIME = {
   pi: 1500,
   py: 1500,
 } as const;
+
+// mkdtempSync prefix for per-spawn private temp dirs (mode 0o700).
+// All bash watchers + spawn-recovery wrappers create one of these and
+// place their files inside instead of using predictable /tmp paths.
+export const SPAWN_TMP_PREFIX = 'brain-spawn-';

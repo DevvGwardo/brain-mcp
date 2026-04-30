@@ -3,9 +3,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { execSync, spawn } from 'node:child_process';
-import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -15,11 +15,12 @@ import { createEmbeddingProvider } from './embeddings.js';
 import { TaskRouter } from './router.js';
 import { registerAutopilot, minimalAgentPrompt } from './autopilot.js';
 import { compileWorkflow } from './workflow.js';
-import { spawnWithRecovery, cleanupSpawnTempFiles, reconcileSessionExit } from './spawn-recovery.js';
+import { spawnWithRecovery, cleanupSpawnTempFiles, freshestMtime, reconcileSessionExit } from './spawn-recovery.js';
 import { renderTool } from './renderer.js';
 import { createServerLogger } from './server-log.js';
 import { registerTmuxSessionRuntime } from './tmux-runtime.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from './agent-watcher.js';
+import { SPAWN_TMP_PREFIX } from './constants.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
 // Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
@@ -72,6 +73,7 @@ if (embeddingProvider) db.setEmbeddingProvider(embeddingProvider);
 // Remove any stale temp files from previous crashed/killed processes on startup.
 const TEMP_FILE_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 const TEMP_FILE_PATTERNS = [
+  SPAWN_TMP_PREFIX,
   'brain-prompt-', 'brain-swarm-', 'brain-watch-',
   'brain-exit-', 'brain-pid-', 'brain-agent-',
 ];
@@ -85,8 +87,15 @@ const TEMP_FILE_PATTERNS = [
       const filePath = join(tmpdir(), file);
       try {
         const stat = statSync(filePath);
-        if (now - stat.mtimeMs > TEMP_FILE_MAX_AGE_MS) {
-          unlinkSync(filePath);
+        const mtimeMs = stat.isDirectory() && file.startsWith(SPAWN_TMP_PREFIX)
+          ? freshestMtime(filePath, stat.mtimeMs)
+          : stat.mtimeMs;
+        if (now - mtimeMs > TEMP_FILE_MAX_AGE_MS) {
+          if (stat.isDirectory()) {
+            rmSync(filePath, { recursive: true, force: true });
+          } else {
+            unlinkSync(filePath);
+          }
           removed++;
         }
       } catch { /* skip inaccessible */ }
@@ -198,7 +207,7 @@ function attachTmuxWatcherFinalizer(
         reconcileSessionExit(db, sessionId, 0, 'tmux pane closed');
       }
     } catch { /* best effort */ }
-    try { unlinkSync(stateFile); } catch { /* best effort */ }
+    try { rmSync(dirname(stateFile), { recursive: true, force: true }); } catch { /* best effort */ }
   });
   watcher.unref();
 }
@@ -1391,9 +1400,10 @@ MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_c
         });
 
         const childEnv = childEnvParts.join(' ');
-        const logFile = join(tmpdir(), `brain-agent-${agentSessionId}.log`);
         const ts = Date.now();
-        const promptFile = join(tmpdir(), `brain-prompt-${ts}-${agentName}.txt`);
+        const tmpDir = mkdtempSync(join(tmpdir(), SPAWN_TMP_PREFIX));
+        const logFile = join(tmpDir, 'agent.log');
+        const promptFile = join(tmpDir, 'prompt.txt');
         writeFileSync(promptFile, prompt);
 
         if (!useVisibleTmux) {
@@ -1508,8 +1518,8 @@ MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_c
           const fallbackReady = cliType === 'hermes'
             ? `echo "$CONTENT" | grep -q "tools\\|model\\|ready" 2>/dev/null`
             : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
-          const watcherFile = join(tmpdir(), `brain-watch-${ts}-${sanitizeName(agentName)}.sh`);
-          const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${sanitizeName(agentName)}.state`);
+          const watcherFile = join(tmpDir, 'watch.sh');
+          const watcherStateFile = join(tmpDir, 'watch.state');
           const watcherContent = `#!/bin/bash
 TARGET="${target}"
 PROMPT="${promptFile}"
@@ -1525,7 +1535,6 @@ check_timeout() {
     tmux send-keys -t "$TARGET" "${exitCmd}" Enter 2>/dev/null
     sleep 5
     tmux kill-pane -t "$TARGET" 2>/dev/null
-    rm -f "${watcherFile}"
     exit 0
   fi
 }
@@ -1558,7 +1567,6 @@ while true; do
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
 printf '%s\n' "pane_closed" > "$STATE_FILE"
-rm -f "${watcherFile}"
 `;
           writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
           const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
@@ -2368,7 +2376,8 @@ MiniMax/Claude hint: if the user asks for "tmux_wake", "brain_wake", "claude_cod
     });
 
     const ts = Date.now();
-    const promptFile = join(tmpdir(), `brain-prompt-${ts}.txt`);
+    const tmpDir = mkdtempSync(join(tmpdir(), SPAWN_TMP_PREFIX));
+    const promptFile = join(tmpDir, 'prompt.txt');
     writeFileSync(promptFile, prompt);
 
     try {
@@ -2376,7 +2385,7 @@ MiniMax/Claude hint: if the user asks for "tmux_wake", "brain_wake", "claude_cod
       //  HEADLESS MODE — no tmux required
       // ══════════════════════════════════════
       if (isHeadless) {
-        const logFile = join(tmpdir(), `brain-agent-${agentSessionId}.log`);
+        const logFile = join(tmpDir, 'agent.log');
         const childEnv = childEnvParts.join(' ');
 
         // Build the headless command per CLI type
@@ -2567,8 +2576,8 @@ fi
           ? `echo "$CONTENT" | grep -q "tools\\|model\\|ready" 2>/dev/null`
           : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
 
-        const watcherFile = join(tmpdir(), `brain-watch-${ts}.sh`);
-        const watcherStateFile = join(tmpdir(), `brain-watch-${ts}.state`);
+        const watcherFile = join(tmpDir, 'watch.sh');
+        const watcherStateFile = join(tmpDir, 'watch.state');
         const watcherContent = `#!/bin/bash
 TARGET="${target}"
 PROMPT="${promptFile}"
@@ -2584,7 +2593,6 @@ check_timeout() {
     tmux send-keys -t "$TARGET" "${exitCmd}" Enter 2>/dev/null
     sleep 5
     tmux kill-pane -t "$TARGET" 2>/dev/null
-    rm -f "${watcherFile}"
     exit 0
   fi
 }
@@ -2620,7 +2628,6 @@ while true; do
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
 printf '%s\n' "pane_closed" > "$STATE_FILE"
-rm -f "${watcherFile}"
 `;
         writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
 

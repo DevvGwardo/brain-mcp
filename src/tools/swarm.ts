@@ -8,7 +8,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { execSync, spawn } from 'node:child_process';
-import { openSync, writeFileSync, closeSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, openSync, rmSync, writeFileSync, closeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -16,6 +16,7 @@ import { BrainDB } from '../db.js';
 import { minimalAgentPrompt } from '../autopilot.js';
 import { spawnWithRecovery, savePreSpawnCheckpoint, buildRecoveryContext, classifyError } from '../spawn-recovery.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from '../agent-watcher.js';
+import { SPAWN_TMP_PREFIX } from '../constants.js';
 import { cNum, cBool, cArr } from './schema-helpers.js';
 
 interface SwarmToolsOptions {
@@ -123,9 +124,9 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           });
 
           const childEnv = childEnvParts.join(' ');
-          const logFile = join(tmpdir(), `brain-agent-${agentSessionId}.log`);
-          const ts = Date.now();
-          const promptFile = join(tmpdir(), `brain-prompt-${ts}-${agentName}.txt`);
+          const tmpDir = mkdtempSync(join(tmpdir(), SPAWN_TMP_PREFIX));
+          const logFile = join(tmpDir, 'agent.log');
+          const promptFile = join(tmpDir, 'prompt.txt');
           writeFileSync(promptFile, prompt);
 
           let headlessCmd: string;
@@ -151,10 +152,8 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           } else {
             db.pulse(agentSessionId, 'failed', `spawn recovery exhausted: ${result.error}`);
             errors.push(`${agentName}: ${result.error}`);
+            try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
           }
-
-          // Clean up prompt file
-          try { unlinkSync(promptFile); } catch { /* best effort */ }
         } catch (err: any) {
           errors.push(`${agentCfg.name}: ${err.message}`);
         }
@@ -260,12 +259,13 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
       const prompt = minimalAgentPrompt(agentName, task, { files, role, acceptance, workspacePath });
 
       const ts = Date.now();
-      const promptFile = join(tmpdir(), `brain-prompt-${ts}.txt`);
+      const tmpDir = mkdtempSync(join(tmpdir(), SPAWN_TMP_PREFIX));
+      const promptFile = join(tmpDir, 'prompt.txt');
       writeFileSync(promptFile, prompt);
 
       try {
         if (isHeadless) {
-          const logFile = join(tmpdir(), `brain-agent-${agentSessionId}.log`);
+          const logFile = join(tmpDir, 'agent.log');
           const childEnv = childEnvParts.join(' ');
 
           let headlessCmd: string;
@@ -284,10 +284,8 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
             headlessCmd, logFile,
           );
 
-          // Clean up prompt file
-          try { unlinkSync(promptFile); } catch { /* best effort */ }
-
           if (!result.success) {
+            try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
             db.pulse(agentSessionId, 'failed', `spawn recovery exhausted: ${result.error}`);
             return {
               content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: result.error }) }],
@@ -388,13 +386,14 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           ? `echo "$CONTENT" | grep -q "tools\\|model\\|ready" 2>/dev/null`
           : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
 
-        const watcherFile = join(tmpdir(), `brain-watch-${ts}.sh`);
+        const watcherFile = join(tmpDir, 'watch.sh');
         const watcherContent = `#!/bin/bash
 TARGET="${target}"
 PROMPT="${promptFile}"
 BUFFER="${bufferName}"
 ABSOLUTE_TIMEOUT=${agentTimeout}
 START_TIME=$(date +%s)
+TMPDIR_PATH="${tmpDir}"
 
 check_timeout() {
   ELAPSED=$(( $(date +%s) - START_TIME ))
@@ -402,7 +401,7 @@ check_timeout() {
     tmux send-keys -t "$TARGET" "${exitCmd}" Enter 2>/dev/null
     sleep 5
     tmux kill-pane -t "$TARGET" 2>/dev/null
-    rm -f "${watcherFile}"
+    rm -rf "$TMPDIR_PATH"
     exit 0
   fi
 }
@@ -434,7 +433,7 @@ while true; do
   check_timeout
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
-rm -f "${watcherFile}"
+rm -rf "$TMPDIR_PATH"
 `;
         writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
         const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });

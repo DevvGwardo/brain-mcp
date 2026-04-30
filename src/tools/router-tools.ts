@@ -2,11 +2,12 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { spawn, execSync } from 'node:child_process';
 import { TaskRouter } from '../router.js';
 import type { BrainDB } from '../db.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from '../agent-watcher.js';
+import { SPAWN_TMP_PREFIX } from '../constants.js';
 
 // ── Schema helpers ──
 const cNum = () => z.preprocess(
@@ -181,7 +182,8 @@ Use this before brain_wake to auto-select the best model for the job.`,
       });
 
       const ts = Date.now();
-      const promptFile = join(tmpdir(), `brain-prompt-${ts}.txt`);
+      const tmpDir = mkdtempSync(join(tmpdir(), SPAWN_TMP_PREFIX));
+      const promptFile = join(tmpDir, 'prompt.txt');
       writeFileSync(promptFile, prompt);
 
       try {
@@ -189,7 +191,7 @@ Use this before brain_wake to auto-select the best model for the job.`,
         //  HEADLESS MODE — no tmux required
         // ═══════════════════════════════════════
         if (isHeadless) {
-          const logFile = join(tmpdir(), `brain-agent-${agentSessionId}.log`);
+          const logFile = join(tmpDir, 'agent.log');
           const childEnv = childEnvParts.join(' ');
 
           // Build the headless command per CLI type
@@ -208,7 +210,7 @@ Use this before brain_wake to auto-select the best model for the job.`,
           }
 
           // Wrapper script with timeout and cleanup
-          const watcherFile = join(tmpdir(), `brain-headless-${ts}.sh`);
+          const watcherFile = join(tmpDir, 'headless.sh');
           const watcherContent = `#!/bin/bash
 AGENT_ID="${agentSessionId}"
 LOG="${logFile}"
@@ -219,7 +221,7 @@ START_TIME=$(date +%s)
 ${headlessCmd}
 EXIT_CODE=$?
 
-# Cleanup
+# Cleanup (leave LOG; sweep handles the rest)
 rm -f "${promptFile}" "${watcherFile}"
 
 # Exit code 0 = success, agent already posted done via brain_pulse
@@ -370,13 +372,14 @@ fi
           ? `echo "$CONTENT" | grep -q "tools\\|model\\|ready" 2>/dev/null`
           : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
 
-        const watcherFile = join(tmpdir(), `brain-watch-${ts}.sh`);
+        const watcherFile = join(tmpDir, 'watch.sh');
         const watcherContent = `#!/bin/bash
 TARGET="${target}"
 PROMPT="${promptFile}"
 BUFFER="${bufferName}"
 ABSOLUTE_TIMEOUT=${agentTimeout}
 START_TIME=$(date +%s)
+TMPDIR_PATH="${tmpDir}"
 
 check_timeout() {
   ELAPSED=$(( $(date +%s) - START_TIME ))
@@ -384,7 +387,7 @@ check_timeout() {
     tmux send-keys -t "$TARGET" "${exitCmd}" Enter 2>/dev/null
     sleep 5
     tmux kill-pane -t "$TARGET" 2>/dev/null
-    rm -f "${watcherFile}"
+    rm -rf "$TMPDIR_PATH"
     exit 0
   fi
 }
@@ -419,7 +422,7 @@ while true; do
   check_timeout
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || break
 done
-rm -f "${watcherFile}"
+rm -rf "$TMPDIR_PATH"
 `;
         writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
 

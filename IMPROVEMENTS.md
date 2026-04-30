@@ -3,12 +3,26 @@
 Author: Claude (analysis pass against current main, 2026-04-29)
 Approach: **depth-first on the highest-leverage item, learn, then expand.**
 
-## Status (updated 2026-04-29)
+## Status (updated 2026-04-29, end of Codex run #1)
 
-- ✅ **Phase 1 complete and shippable behind feature flag.** Daemon code lands on `main` with `BRAIN_WATCHER_MODE` defaulting to `bash` — production behavior unchanged until the flag is flipped.
-- ⏭ **Next:** burn-in `BRAIN_WATCHER_MODE=daemon` against real Hermes workflows for ~2 weeks, then flip the default and remove bash code in a follow-up.
-- ⏸ **Phase 2–5:** scoped with sub-task checklists (this doc). Recommended landing order: **2.4 → 2.1 → 5.1 → 2.2 → 3.1** (cheap correctness fixes + test coverage before refactors).
-- 🔍 **Investigation surprise:** the codebase has **7** watcher generators in two contract families, not 4 as estimated. The two older sites in `src/tools/router-tools.ts` and `src/tools/swarm.ts` skip `STATE_FILE`/finalizer entirely — closing that correctness gap is a free win when `BRAIN_WATCHER_MODE=daemon` is on.
+**11 of 22 items shipped.** All gates green: `tsc --noEmit` clean, 228 PASS / 0 FAIL across 6 test files, all Phase 1 invariants preserved.
+
+- ✅ **Phase 1** (daemon behind `BRAIN_WATCHER_MODE=daemon`, default still `bash`).
+- ✅ **Phase 2.1, 2.2, 2.4** (failureTracker → SQLite, `process.kill(pid, 0)` standardization, watchdog graceful shutdown).
+- ✅ **Phase 3.1, 3.4, 3.5** (`src/constants.ts`, per-spawn 0o700 tmp dirs, per-runtime `STARTUP_GRACE_MS`).
+- ✅ **Phase 5.1** (spawn-recovery unit tests, 97.1% named-function line coverage).
+- ⏭ **Next:** 3.3 (needs allowlist sign-off) → 3.2 → 5.3 → 5.2. ~1 day of work to clear the rest.
+- ⏸ **Blocked on burn-in:** 2.3, 4.1, 4.2, 4.3 — wait until `BRAIN_WATCHER_MODE=daemon` runs cleanly in real Hermes workflows for ~2 weeks, then flip default + delete bash in a follow-up PR.
+- ⏸ **Deferred indefinitely:** 5.4 (current 47-line logger is fine).
+
+### What only the user can do
+
+1. **Commit Phase 1.** `src/agent-watcher.{ts,test.ts}`, the 7 callsite wires, and the `pane_watches`/`daemon_locks` schema are still uncommitted in working tree. Codex's 6 commits layered cleanly on top — should land Phase 1 as its own PR before more commits stack up.
+2. **Burn-in.** Set `BRAIN_WATCHER_MODE=daemon`; run real Hermes workflows for ~2 weeks; watch `pane_watches` rows transition correctly. Checklist below.
+3. **Post-burn-in follow-up PR.** Flip the default to `daemon` and delete the ~250 lines of bash watcher code across 4 files. Unlocks 2.3 and 4.x.
+
+- 🔍 **Investigation surprise (Phase 1.1):** the codebase has **7** watcher generators in two contract families, not 4 as estimated. The two older sites in `src/tools/router-tools.ts` and `src/tools/swarm.ts` skip `STATE_FILE`/finalizer entirely — closing that correctness gap is a free win when `BRAIN_WATCHER_MODE=daemon` is on.
+- 🐛 **Bug found and fixed in Phase 1:** `setTimeout(...).unref()` suppresses signal handler delivery on macOS in long-lived loops with signal handlers. Codex applied the same lesson cleanly in 2.4 (watchdog wake-on-signal pattern actually nicer than the agent-watcher's — worth backporting later).
 
 ### Phase tracker
 
@@ -26,7 +40,7 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 | 3.1 | `src/constants.ts` | ✅ | shared retry/backoff constants |
 | 3.2 | `execFile` migration | ⏸ | parallelizable |
 | 3.3 | Env allowlist | ⏸ | parallelizable |
-| 3.4 | `mkdtemp` 0o700 | ⏸ | parallelizable |
+| 3.4 | `mkdtemp` 0o700 | ✅ | per-spawn dirs mode 0o700, cleanup uses freshest-mtime |
 | 3.5 | Per-runtime `STARTUP_GRACE_MS` | ✅ | runtime-specific startup grace |
 | 4.1 | `AgentRuntime` interface | ⏸ | wait until Phase 1 burned in + bash deleted |
 | 4.2 | `index.ts` decomposition | ⏸ | mechanical, churn-heavy |
@@ -166,12 +180,14 @@ Mechanical and isolated — these can run in parallel via subagents once Phase 1
 - [ ] Update all spawn sites in `spawn-recovery.ts`, `conductor.ts`, `index.ts`, `tools/*.ts` to use the helper.
 - [ ] Verify: spawn an agent in headless mode, dump env, confirm no leaked secrets.
 
-### 3.4 Secure tmp files via `mkdtemp` 0o700 ⏸
-Predictable `/tmp/brain-watch-${ts}-${name}.sh` paths in shared `/tmp` is a symlink-attack surface. Move to per-spawn dirs.
-- [ ] Replace `tmpdir() + 'brain-...'` patterns with `fs.mkdtempSync(join(tmpdir(), 'brain-'))` returning a 0o700 dir.
-- [ ] Files inside that dir get fixed names (no race).
-- [ ] Update `cleanupStaleTempFiles` patterns in `watchdog.ts` to match new naming.
-- [ ] Verify: spawn → confirm dir mode 0o700 and isolated.
+### 3.4 Secure tmp files via `mkdtemp` 0o700 ✅
+Predictable `/tmp/brain-watch-${ts}-${name}.sh` paths were a symlink-attack surface. Per-spawn `mkdtempSync(SPAWN_TMP_PREFIX)` dirs (mode 0o700) now hold all spawn temp files.
+- [x] `SPAWN_TMP_PREFIX = 'brain-spawn-'` in `src/constants.ts`. All 7 watcher sites + `spawn-recovery` wrapper switched to `mkdtempSync`.
+- [x] Files inside the dir get fixed names (`watch.sh`, `watch.state`, `prompt.txt`, `system.txt`, `wrapper.sh`, `pid`, `exit`, `agent.log`). No filename collision risk because the dir itself is unique.
+- [x] Cleanup updated in 3 places (`startupTempCleanup` in `index.ts`, `cleanupStaleTempFiles` in `watchdog.ts`, `cleanupSpawnTempFiles` in `spawn-recovery.ts`) — all keep old patterns AND add SPAWN_TMP_PREFIX dir handling. Use shared `freshestMtime()` helper so long-running agents writing to `agent.log` keep their dir alive past the 1h sweep.
+- [x] Newer-family bash watchers stop rming files at end (Node finalizer rms the dir after reading state). Older-family bash watchers `rm -rf "$TMPDIR_PATH"` at end (no state file to preserve).
+- [x] **Bonus fix:** pi mode's asymmetric `systemFile` cleanup is gone — finalizer rms the whole dir on both `pane_closed` and `timeout`.
+- [x] Verify: smoke confirms `mode: 700`; full test suite (228 PASS) and agent-watcher end-to-end smoke green.
 
 ### 3.5 Per-runtime `STARTUP_GRACE_MS` ✅
 Currently hardcoded `1500` in `spawn-recovery.ts:27`. Claude needs ~5–10s to print first marker; pi/py <1s. Mismatch causes false-positive crash detection on slow Claude boot.

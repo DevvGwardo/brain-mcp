@@ -31,7 +31,7 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 | 4.1 | `AgentRuntime` interface | ⏸ | wait until Phase 1 burned in + bash deleted |
 | 4.2 | `index.ts` decomposition | ⏸ | mechanical, churn-heavy |
 | 4.3 | Tmux runtime abstraction | ⏸ | depends on 4.1 |
-| 5.1 | `spawn-recovery.ts` tests | ⏸ | **prereq for 4.1** |
+| 5.1 | `spawn-recovery.ts` tests | ✅ | 97.1% named-function line coverage |
 | 5.2 | wake+daemon integration test | ⏸ | parallelizable |
 | 5.3 | Spawn metrics | ⏸ | hook into existing `spawn_metrics` table |
 | 5.4 | Structured logging | ⏸ | **skip until earned** |
@@ -219,15 +219,15 @@ brain-mcp assumes tmux exists. Headless server use (Hermes background workers, C
 
 Can run in parallel with Phase 2 — none of these depend on the daemon being default. **5.1 should land before 4.1** (need test coverage before refactoring the spawn paths).
 
-### 5.1 Unit tests for `spawn-recovery.ts` ⏸
+### 5.1 Unit tests for `spawn-recovery.ts` ✅
 Currently zero coverage on `classifyError`, `recordSpawnFailure`, `shouldEscalate`, `reconcileSessionExit`, `waitForStartup` — the critical retry/backoff path.
 
-- [ ] `src/spawn-recovery.test.ts` (new). Mirror the hand-rolled `test()` framework already used elsewhere.
-- [ ] `classifyError`: ENOENT/EACCES/ETIMEDOUT/UNKNOWN cases; recoverable flags.
-- [ ] Backoff math: `recordSpawnFailure` increments + sets `backoffUntil` correctly.
-- [ ] Escalation: `shouldEscalate` flips at `ESCALATION_THRESHOLD`.
-- [ ] `reconcileSessionExit`: exit 0 with/without confirmed work; exit non-zero; idempotent on already-terminal session.
-- [ ] Verify: ≥80% line coverage on `spawn-recovery.ts`.
+- [x] `src/spawn-recovery.test.ts` (new). Mirror the hand-rolled `test()` framework already used elsewhere.
+- [x] `classifyError`: ENOENT/EACCES/ETIMEDOUT/UNKNOWN cases; recoverable flags.
+- [x] Backoff math: `recordSpawnFailure` increments + sets `backoffUntil` correctly.
+- [x] Escalation: `shouldEscalate` flips at `ESCALATION_THRESHOLD`.
+- [x] `reconcileSessionExit`: exit 0 with/without confirmed work; exit non-zero; idempotent on already-terminal session.
+- [x] Verify: ≥80% line coverage on `spawn-recovery.ts`.
 
 ### 5.2 Integration test for `wake` + watcher daemon ⏸
 End-to-end test that spawns a real daemon process against a real tmux pane.

@@ -489,7 +489,7 @@ export function reconcileSessionExit(
   return { finalized: true, status: 'failed', progress };
 }
 
-function waitForStartup(
+export function waitForStartup(
   db: BrainDB,
   sessionId: string,
   proc: ReturnType<typeof spawn>,

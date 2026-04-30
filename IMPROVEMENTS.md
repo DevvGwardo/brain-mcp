@@ -9,9 +9,11 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 
 - ✅ **Phase 1** (daemon behind `BRAIN_WATCHER_MODE=daemon`, default still `bash`).
 - ✅ **Phase 2.1, 2.2, 2.4** (failureTracker → SQLite, `process.kill(pid, 0)` standardization, watchdog graceful shutdown).
-- ✅ **Phase 3.1, 3.2, 3.3, 3.4, 3.5** — all of Phase 3 done. Constants extracted, execFile migration (126 sites), env allowlist, 0o700 tmp dirs, per-runtime `STARTUP_GRACE_MS`.
-- ✅ **Phase 5.1, 5.3** — spawn-recovery unit tests (97.1% line coverage); spawn metrics wired at 6 paths with runtime/transport breakdown.
-- ⏭ **Next:** 5.2 (wake+daemon integration test). ~1.5 hours.
+- ✅ **Phase 3.x** — all five items done. Constants, execFile migration (126 sites), env allowlist, 0o700 tmp dirs, per-runtime `STARTUP_GRACE_MS`.
+- ✅ **Phase 5.1, 5.2, 5.3** — spawn-recovery unit tests (97.1% line coverage); 3-case real-tmux integration test for the daemon; spawn metrics wired at 6 paths with runtime/transport breakdown.
+- ✅ **Phase 2.x** — all four items done by Codex run #1 (2.1, 2.2, 2.4) and parked (2.3 — pane-died hook, gated on burn-in).
+
+**17 of 22 items shipped.** Remaining are all gated on the daemon burn-in (2.3, 4.1, 4.2, 4.3) or deferred indefinitely (5.4 — pino).
 - ⏸ **Blocked on burn-in:** 2.3, 4.1, 4.2, 4.3 — wait until `BRAIN_WATCHER_MODE=daemon` runs cleanly in real Hermes workflows for ~2 weeks, then flip default + delete bash in a follow-up PR.
 - ⏸ **Deferred indefinitely:** 5.4 (current 47-line logger is fine).
 
@@ -46,7 +48,7 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 | 4.2 | `index.ts` decomposition | ⏸ | mechanical, churn-heavy |
 | 4.3 | Tmux runtime abstraction | ⏸ | depends on 4.1 |
 | 5.1 | `spawn-recovery.ts` tests | ✅ | 97.1% named-function line coverage |
-| 5.2 | wake+daemon integration test | ⏸ | parallelizable |
+| 5.2 | wake+daemon integration test | ✅ | `src/wake-daemon.integration.ts` — 3 cases, real tmux + daemon |
 | 5.3 | Spawn metrics | ✅ | wired at 6 spawn paths; runtime+transport columns; `getDaemonSummary` view |
 | 5.4 | Structured logging | ⏸ | **skip until earned** |
 
@@ -253,14 +255,13 @@ Currently zero coverage on `classifyError`, `recordSpawnFailure`, `shouldEscalat
 - [x] `reconcileSessionExit`: exit 0 with/without confirmed work; exit non-zero; idempotent on already-terminal session.
 - [x] Verify: ≥80% line coverage on `spawn-recovery.ts`.
 
-### 5.2 Integration test for `wake` + watcher daemon ⏸
-End-to-end test that spawns a real daemon process against a real tmux pane.
-
-- [ ] `src/integration/wake-watcher.test.ts` (new). Skip when no tmux available (`tmux display-message` fails).
-- [ ] Test 1: enqueue `pi`-style watch on a pane running `sleep 1`; confirm row transitions to `terminal/pane_closed` and session reconciled within 5s.
-- [ ] Test 2: enqueue with `timeout_sec=2` on `sleep 60`; confirm soft-exit + kill-pane + `terminal/timeout` + exit 124.
-- [ ] Test 3: spawn daemon, kill mid-flight (SIGKILL), respawn, confirm in-flight watches resume from `pane_watches`.
-- [ ] Wire into smoke harness (`smoke-test.mjs` or new entry).
+### 5.2 Integration test for `wake` + watcher daemon ✅
+- [x] `src/wake-daemon.integration.ts` (no `.test.` infix so it stays out of the default `dist/*.test.js` sweep — slow + needs tmux). Skips automatically when `tmux -V` fails. Run explicitly with `npx tsc && node dist/wake-daemon.integration.js`.
+- [x] **Test 1 — normal exit:** isolated tmux session, pane runs `sleep 1`, daemon polls; row transitions to `terminal/pane_closed` within 8s; session reconciled to `done` with `exit_code = 0`. (4 PASS)
+- [x] **Test 2 — timeout:** pane runs `sleep 30`, watch has `timeout_sec=3`, `kill_grace_sec=2`, `exit_command='C-c'`; daemon sends C-c, kills pane after grace, marks `terminal/timeout` + session `failed` + `exit_code = 124`. (4 PASS)
+- [x] **Test 3 — daemon kill + respawn:** first daemon claims lock; SIGKILL'd mid-flight (lock left stale); second daemon spawns, takes the stale lock, resumes the in-flight watch from `pane_watches`, reconciles when pane closes naturally. (5 PASS)
+- [x] Each test creates an isolated `tmux new-session -d` and tears it down on completion. No pollution of the user's tmux.
+- [x] All 13 assertions PASS on macOS tmux 3.x.
 
 ### 5.3 Spawn metrics ✅
 Audit found **none** of the existing 6 spawn paths were writing to the `spawn_metrics` table — table was empty. Now all 6 paths write through.

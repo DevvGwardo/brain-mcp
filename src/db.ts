@@ -239,6 +239,9 @@ export interface PaneWatchInsert {
 
 // ── Spawn Metrics ──
 
+export type AgentRuntimeKind = 'claude' | 'hermes' | 'codex' | 'pi' | 'py' | 'unknown';
+export type SpawnTransport = 'tmux-bash' | 'tmux-daemon' | 'headless' | 'unknown';
+
 export interface SpawnMetric {
   id: number;
   room: string;
@@ -255,7 +258,18 @@ export interface SpawnMetric {
   memory_usage_bytes: number | null;
   cpu_usage_percent: number | null;
   task_description: string | null;
+  runtime: AgentRuntimeKind | null;
+  transport: SpawnTransport | null;
   created_at: string;
+}
+
+export interface DaemonSummaryRow {
+  transport: string;
+  total_spawns: number;
+  successful_spawns: number;
+  failed_spawns: number;
+  avg_spawn_duration_ms: number | null;
+  success_rate: number | null;
 }
 
 export interface SpawnMetricSummary {
@@ -605,6 +619,9 @@ export class BrainDB {
     `);
     try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_spawn_metrics_room ON spawn_metrics(room)"); } catch { /* already exists */ }
     try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_spawn_metrics_session ON spawn_metrics(session_id)"); } catch { /* already exists */ }
+    // 5.3 — runtime/transport breakdown for daemon-vs-bash analysis
+    try { this.db.exec("ALTER TABLE spawn_metrics ADD COLUMN runtime TEXT"); } catch { /* already exists */ }
+    try { this.db.exec("ALTER TABLE spawn_metrics ADD COLUMN transport TEXT"); } catch { /* already exists */ }
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agent_failures (
@@ -831,6 +848,9 @@ export class BrainDB {
 
     // If session is still 'queued' and this pulse says 'working', confirm the transition
     if (session.status === 'queued' && status === 'working') {
+      // First heartbeat — fill in spawn timing on both sessions and spawn_metrics.
+      try { this.recordSessionFirstHeartbeat(id); } catch { /* best effort */ }
+      try { this.recordSpawnSuccess(id); } catch { /* best effort */ }
       return this.pulse(id, 'working', progress);
     }
 
@@ -1733,12 +1753,16 @@ export class BrainDB {
    */
   recordSpawnStarted(
     room: string, agentName: string, sessionId: string,
-    taskDescription?: string, agentId?: string
+    taskDescription?: string, agentId?: string,
+    runtime?: AgentRuntimeKind, transport?: SpawnTransport,
   ): number {
     const result = this.db.prepare(
-      `INSERT INTO spawn_metrics (room, agent_name, agent_id, session_id, spawn_started_at, task_description)
-       VALUES (?, ?, ?, ?, datetime('now'), ?)`
-    ).run(room, agentName, agentId || null, sessionId, taskDescription || null);
+      `INSERT INTO spawn_metrics (room, agent_name, agent_id, session_id, spawn_started_at, task_description, runtime, transport)
+       VALUES (?, ?, ?, ?, datetime('now'), ?, ?, ?)`
+    ).run(
+      room, agentName, agentId || null, sessionId,
+      taskDescription || null, runtime || null, transport || null,
+    );
     this.events.emit('spawn_started', { session_id: sessionId, agent_name: agentName, room });
     return Number(result.lastInsertRowid);
   }
@@ -1814,6 +1838,28 @@ export class BrainDB {
          AVG(cpu_usage_percent) as avg_cpu_percent
        FROM spawn_metrics WHERE room = ? GROUP BY agent_name ORDER BY total_spawns DESC`
     ).all(room) as SpawnMetricSummary[];
+  }
+
+  /**
+   * Daemon-vs-bash summary — group spawn_metrics by transport so we can
+   * compare BRAIN_WATCHER_MODE=daemon vs the legacy bash watcher path
+   * during burn-in. Only meaningful once spawn metrics are wired into
+   * every spawn site (Phase 5.3).
+   */
+  getDaemonSummary(room: string): DaemonSummaryRow[] {
+    return this.db.prepare(
+      `SELECT
+         COALESCE(transport, 'unknown') as transport,
+         COUNT(*) as total_spawns,
+         SUM(spawn_success) as successful_spawns,
+         SUM(CASE WHEN spawn_success = 0 AND spawn_completed_at IS NOT NULL THEN 1 ELSE 0 END) as failed_spawns,
+         AVG(spawn_duration_ms) as avg_spawn_duration_ms,
+         ROUND(1.0 * SUM(spawn_success) / NULLIF(COUNT(*), 0), 3) as success_rate
+       FROM spawn_metrics
+       WHERE room = ?
+       GROUP BY COALESCE(transport, 'unknown')
+       ORDER BY total_spawns DESC`,
+    ).all(room) as DaemonSummaryRow[];
   }
 
   getSpawnTimingTrend(room: string, hours = 24): SpawnTimingTrend[] {

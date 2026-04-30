@@ -304,6 +304,11 @@ function spawnAgent(
   const modeLabel = config.mode === 'pi' ? 'pi agent' : config.mode === 'py' ? 'py agent' : 'Claude';
 
   db.pulse(agentSessionId, 'queued', `spawn queued by conductor; waiting for first heartbeat (${modeLabel})`);
+  db.recordSpawnStarted(
+    config.cwd, agentName, agentSessionId, agentTask, agentSessionId,
+    config.mode === 'pi' ? 'pi' : config.mode === 'py' ? 'py' : 'claude',
+    watcherModeFromEnv() === 'daemon' ? 'tmux-daemon' : 'tmux-bash',
+  );
 
   // Build env vars (shared between all modes) — explicit allowlist + brain-mcp coords.
   const envParts = agentEnvShellPairs({

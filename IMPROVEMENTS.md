@@ -10,8 +10,8 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 - ✅ **Phase 1** (daemon behind `BRAIN_WATCHER_MODE=daemon`, default still `bash`).
 - ✅ **Phase 2.1, 2.2, 2.4** (failureTracker → SQLite, `process.kill(pid, 0)` standardization, watchdog graceful shutdown).
 - ✅ **Phase 3.1, 3.2, 3.3, 3.4, 3.5** — all of Phase 3 done. Constants extracted, execFile migration (126 sites), env allowlist, 0o700 tmp dirs, per-runtime `STARTUP_GRACE_MS`.
-- ✅ **Phase 5.1** (spawn-recovery unit tests, 97.1% named-function line coverage).
-- ⏭ **Next:** 5.3 (spawn metrics) → 5.2 (integration test). ~3 hours of work.
+- ✅ **Phase 5.1, 5.3** — spawn-recovery unit tests (97.1% line coverage); spawn metrics wired at 6 paths with runtime/transport breakdown.
+- ⏭ **Next:** 5.2 (wake+daemon integration test). ~1.5 hours.
 - ⏸ **Blocked on burn-in:** 2.3, 4.1, 4.2, 4.3 — wait until `BRAIN_WATCHER_MODE=daemon` runs cleanly in real Hermes workflows for ~2 weeks, then flip default + delete bash in a follow-up PR.
 - ⏸ **Deferred indefinitely:** 5.4 (current 47-line logger is fine).
 
@@ -47,7 +47,7 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 | 4.3 | Tmux runtime abstraction | ⏸ | depends on 4.1 |
 | 5.1 | `spawn-recovery.ts` tests | ✅ | 97.1% named-function line coverage |
 | 5.2 | wake+daemon integration test | ⏸ | parallelizable |
-| 5.3 | Spawn metrics | ⏸ | hook into existing `spawn_metrics` table |
+| 5.3 | Spawn metrics | ✅ | wired at 6 spawn paths; runtime+transport columns; `getDaemonSummary` view |
 | 5.4 | Structured logging | ⏸ | **skip until earned** |
 
 A breadth-first parallel swarm against this codebase is the wrong move because (a) the bash watcher pattern likely encodes load-bearing reliability behavior I haven't grokked yet, (b) brain-mcp is the runtime your hermes integration depends on so a bad PR breaks live workflow, and (c) the architecture-level items conflict with each other and can't be parallelized safely.
@@ -262,14 +262,22 @@ End-to-end test that spawns a real daemon process against a real tmux pane.
 - [ ] Test 3: spawn daemon, kill mid-flight (SIGKILL), respawn, confirm in-flight watches resume from `pane_watches`.
 - [ ] Wire into smoke harness (`smoke-test.mjs` or new entry).
 
-### 5.3 Spawn metrics ⏸
-Already a `spawn_metrics` table in `db.ts:524`. Hook it into all spawn paths so we can see daemon-vs-bash latency and failure rates.
+### 5.3 Spawn metrics ✅
+Audit found **none** of the existing 6 spawn paths were writing to the `spawn_metrics` table — table was empty. Now all 6 paths write through.
 
-- [ ] Audit: which spawn sites already write `spawn_metrics`? Which don't?
-- [ ] Helper `recordSpawnMetric(db, { agentName, sessionId, spawnDurationMs, success, error?, runtime })`.
-- [ ] Call from every spawn path including the daemon path.
-- [ ] Add `brain_metrics view=daemon_summary` query for at-a-glance.
-- [ ] Verify: run a swarm; query `spawn_metrics`; confirm rows for each agent.
+- [x] Audited: zero callers of `db.recordSpawnStarted/Success/Failure` before this PR (the same-named in-memory helpers in `spawn-recovery.ts` are unrelated to the DB methods).
+- [x] Schema: `ALTER TABLE spawn_metrics ADD COLUMN runtime TEXT` + `transport TEXT`. New types `AgentRuntimeKind` and `SpawnTransport`.
+- [x] `db.recordSpawnStarted(... runtime, transport)` extended; wired at 6 spawn paths:
+  - `conductor.ts` (1 site, dispatches pi/py/claude)
+  - `index.ts` swarm v2 (1)
+  - `index.ts` wake (1)
+  - `tools/router-tools.ts` wake (1)
+  - `tools/swarm.ts` swarm-headless (1)
+  - `tools/swarm.ts` wake-style (1)
+- [x] Success path: `db.pulseWithFirstConfirm` now fires `db.recordSpawnSuccess` on the queued→working transition (best-effort, no behavior change to pulse contract). Spawn duration filled in automatically by the existing UPDATE.
+- [x] Failure path: `spawnWithRecovery` permanent-failure exits all call `db.recordSpawnFailure(agentId, message)` (best-effort). Three exit points: classified non-recoverable startup failure, classified non-recoverable spawn error, exhausted retries.
+- [x] `db.getDaemonSummary(room)` returns rows grouped by transport with total/successful/failed/avg_duration/success_rate — drop-in for a `brain_metrics view=daemon_summary` query later.
+- [x] End-to-end smoke (in-repo): two synthetic agents spawn (one tmux-daemon claude, one tmux-bash pi); first pulses `working` then summary shows correct success_rate per transport. SMOKE PASS.
 
 ### 5.4 Structured logging ⏸
 `src/server-log.ts` is fine for now (file-backed, optional stderr mirror). Replace with `pino` only if/when it earns its keep.

@@ -1399,6 +1399,12 @@ MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_c
           (cliBase === 'hermes' || cliBase.includes('hermes')) ? 'hermes' :
           'other';
 
+        db.recordSpawnStarted(
+          room, agentName, agentSessionId, agentCfg.task, agentSessionId,
+          cliType === 'claude' ? 'claude' : cliType === 'hermes' ? 'hermes' : 'unknown',
+          !useVisibleTmux ? 'headless' : (watcherModeFromEnv() === 'daemon' ? 'tmux-daemon' : 'tmux-bash'),
+        );
+
         // Use minimal autopilot prompt — works for ALL CLIs
         const prompt = minimalAgentPrompt(agentName, agentCfg.task, {
           files: agentCfg.files,
@@ -2357,6 +2363,12 @@ MiniMax/Claude hint: if the user asks for "tmux_wake", "brain_wake", "claude_cod
       (cliBase === 'hermes' || cliBase.includes('hermes')) ? 'hermes' :
       (cliBase === 'codex' || cliBase.includes('codex')) ? 'codex' :
       'other';
+
+    db.recordSpawnStarted(
+      room, agentName, agentSessionId, task, agentSessionId,
+      cliType === 'other' ? 'unknown' : cliType,
+      isHeadless ? 'headless' : (watcherModeFromEnv() === 'daemon' ? 'tmux-daemon' : 'tmux-bash'),
+    );
 
     // Build model flag per CLI
     let modelFlag = '';

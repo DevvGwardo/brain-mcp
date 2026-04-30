@@ -165,6 +165,12 @@ Use this before brain_wake to auto-select the best model for the job.`,
         (cliBase === 'hermes' || cliBase.includes('hermes')) ? 'hermes' :
         'other';
 
+      db.recordSpawnStarted(
+        room, agentName, agentSessionId, task, agentSessionId,
+        cliType === 'claude' ? 'claude' : cliType === 'hermes' ? 'hermes' : 'unknown',
+        isHeadless ? 'headless' : (watcherModeFromEnv() === 'daemon' ? 'tmux-daemon' : 'tmux-bash'),
+      );
+
       // Build model flag per CLI
       let modelFlag = '';
       if (model) {

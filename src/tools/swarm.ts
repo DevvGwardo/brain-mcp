@@ -116,6 +116,12 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
             (cliBase === 'hermes' || cliBase.includes('hermes')) ? 'hermes' :
             'other';
 
+          db.recordSpawnStarted(
+            room, agentName, agentSessionId, agentCfg.task, agentSessionId,
+            cliType === 'claude' ? 'claude' : cliType === 'hermes' ? 'hermes' : 'unknown',
+            'headless',
+          );
+
           const prompt = minimalAgentPrompt(agentName, agentCfg.task, {
             files: agentCfg.files,
             role: agentCfg.role,
@@ -250,6 +256,12 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
         (cliBase === 'claude' || cliBase.includes('claude')) ? 'claude' :
         (cliBase === 'hermes' || cliBase.includes('hermes')) ? 'hermes' :
         'other';
+
+      db.recordSpawnStarted(
+        room, agentName, agentSessionId, task, agentSessionId,
+        cliType === 'claude' ? 'claude' : cliType === 'hermes' ? 'hermes' : 'unknown',
+        isHeadless ? 'headless' : (watcherModeFromEnv() === 'daemon' ? 'tmux-daemon' : 'tmux-bash'),
+      );
 
       let modelFlag = '';
       if (model) {

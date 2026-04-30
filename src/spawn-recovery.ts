@@ -681,6 +681,7 @@ export async function spawnWithRecovery(
 
       if (!classified.recoverable) {
         try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
+        try { db.recordSpawnFailure(agentId, classified.message); } catch { /* best effort */ }
         return {
           success: false,
           error: classified.message,
@@ -701,6 +702,7 @@ export async function spawnWithRecovery(
       if (!classified.recoverable) {
         // Permanent failure — don't retry
         try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
+        try { db.recordSpawnFailure(agentId, classified.message); } catch { /* best effort */ }
 
         return {
           success: false,
@@ -718,6 +720,7 @@ export async function spawnWithRecovery(
 
   // All retries exhausted
   try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  try { db.recordSpawnFailure(agentId, `spawn exhausted retries: ${record.lastError}`); } catch { /* best effort */ }
 
   return {
     success: false,

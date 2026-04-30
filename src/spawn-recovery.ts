@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentFailureRecord as PersistedAgentFailure, BrainDB } from './db.js';
 import { createServerLogger } from './server-log.js';
+import { isProcessAlive } from './tmux-runtime.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -410,15 +411,6 @@ export interface SessionExitResolution {
   finalized: boolean;
   status?: 'done' | 'failed';
   progress?: string;
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function readFailureDetails(logFile: string, exitCodeFile: string): { exitCode?: number; error?: string } {

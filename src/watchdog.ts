@@ -23,7 +23,7 @@ import {
   type RecoveryContext,
 } from './spawn-recovery.js';
 import { createServerLogger } from './server-log.js';
-import { getTmuxPanePid, isTmuxTargetAlive, readTmuxTargetFromSession } from './tmux-runtime.js';
+import { getTmuxPanePid, isProcessAlive, isTmuxTargetAlive, readTmuxTargetFromSession } from './tmux-runtime.js';
 
 const dbPath = process.env.BRAIN_DB_PATH || `${process.env.HOME}/.claude/brain/brain.db`;
 const room = process.env.BRAIN_ROOM || process.cwd();
@@ -92,36 +92,20 @@ function cleanupStaleTempFiles(): number {
 // ── Process table checking ───────────────────────────────────────────────────
 
 /**
- * Check if a process with the given PID is actually running.
- * Returns true if the process exists and is not a zombie.
- */
-function isProcessAlive(pid: number): boolean {
-  try {
-    // Use ps to check process state — 'Z' = zombie
-    const output = execSync(`ps -o state= -p ${pid} 2>/dev/null`, { encoding: 'utf8', timeout: 3000 });
-    const state = output.trim();
-    // State is single letter: S=sleeping, R=running, I=idle, Z=zombie, etc.
-    return state !== 'Z' && state !== '';
-  } catch {
-    // Process doesn't exist or ps failed
-    return false;
-  }
-}
-
-/**
  * Get detailed process info for an agent.
  */
 function getProcessInfo(pid: number): { alive: boolean; state: string; cmd: string } | null {
+  if (!isProcessAlive(pid)) return null;
   try {
     const stateOut = execSync(`ps -o state= -p ${pid} 2>/dev/null`, { encoding: 'utf8', timeout: 3000 }).trim();
     const cmdOut = execSync(`ps -o comm= -p ${pid} 2>/dev/null`, { encoding: 'utf8', timeout: 3000 }).trim();
     return {
-      alive: stateOut !== 'Z' && stateOut !== '',
+      alive: true,
       state: stateOut,
       cmd: cmdOut,
     };
   } catch {
-    return null;
+    return { alive: true, state: 'unknown', cmd: 'unknown' };
   }
 }
 

@@ -42,6 +42,16 @@ export function isTmuxTargetAlive(target: string, execRunner: ExecRunner = execS
   return runTmuxQuery(`tmux display-message -t ${sh(target)} -p ""`, execRunner) !== null;
 }
 
+export function isProcessAlive(pid: number): boolean {
+  try {
+    // kill(pid, 0) treats zombies as alive; we rely on heartbeat staleness in watchdog.ts to catch that case.
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function registerTmuxSessionRuntime(
   db: BrainDB,
   sessionId: string,

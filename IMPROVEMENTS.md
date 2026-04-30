@@ -20,7 +20,7 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 | 1.4 | Verification | ✅ | unit + smoke; live-env smoke deferred |
 | 1.5 | Migration safety | ✅ | flag default `bash`; flip after burn-in |
 | 2.1 | Persist failureTracker | ✅ | `agent_failures` table + DB-backed accessors |
-| 2.2 | `process.kill(pid, 0)` standardization | ⏸ | mechanical |
+| 2.2 | `process.kill(pid, 0)` standardization | ✅ | shared helper in `tmux-runtime.ts` |
 | 2.3 | tmux `pane-died` hook | ⏸ | wait until daemon is default |
 | 2.4 | Watchdog SIGTERM handler | ✅ | graceful SIGINT/SIGTERM shutdown |
 | 3.1 | `src/constants.ts` | ⏸ | needs 2.1 done first (constants will move) |
@@ -114,13 +114,13 @@ Two parallel in-memory `Map`s — `watchdog.ts:62` and `spawn-recovery.ts:51` �
 - [x] Verify: kill watchdog mid-flight while a failure record exists; restart; confirm record survives and backoff still applies.
 - **Estimate:** ~150 lines, half-day. **Risk:** low — the in-memory Map API is small.
 
-### 2.2 Standardize liveness on `process.kill(pid, 0)` ⏸
+### 2.2 Standardize liveness on `process.kill(pid, 0)` ✅
 `watchdog.ts:103` shells out to `ps -o state= -p $pid` (~30ms each call, OS-specific). `spawn-recovery.ts:383` already uses the fast `process.kill(pid, 0)` form. With the daemon centralizing pane liveness, this becomes one helper.
 
-- [ ] Decide: do we still need zombie (`Z` state) detection? `process.kill(pid, 0)` returns true for zombies, `ps` filters them out. Document the choice in code comment.
-- [ ] If keeping zombie detection: shared helper `isProcessAlive(pid)` in `tmux-runtime.ts` that does `kill(pid, 0)` then a single `ps` check. Otherwise: `kill(pid, 0)` only.
-- [ ] Migrate `watchdog.ts:103` to the shared helper.
-- [ ] Delete the duplicate `isProcessAlive` in `spawn-recovery.ts`.
+- [x] Decide: do we still need zombie (`Z` state) detection? `process.kill(pid, 0)` returns true for zombies, `ps` filters them out. Document the choice in code comment.
+- [x] If keeping zombie detection: shared helper `isProcessAlive(pid)` in `tmux-runtime.ts` that does `kill(pid, 0)` then a single `ps` check. Otherwise: `kill(pid, 0)` only.
+- [x] Migrate `watchdog.ts:103` to the shared helper.
+- [x] Delete the duplicate `isProcessAlive` in `spawn-recovery.ts`.
 - **Estimate:** <100 lines, hour. **Risk:** low — change is mechanical.
 
 ### 2.3 tmux `pane-died` event hook ⏸

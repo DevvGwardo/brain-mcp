@@ -1,4 +1,4 @@
-import { getTmuxPanePid, isTmuxTargetAlive, readTmuxTargetFromSession } from './tmux-runtime.js';
+import { getTmuxPanePid, isProcessAlive, isTmuxTargetAlive, readTmuxTargetFromSession } from './tmux-runtime.js';
 
 function assert(condition: boolean, message: string) {
   if (!condition) throw new Error(`FAIL: ${message}`);
@@ -38,4 +38,9 @@ test('isTmuxTargetAlive treats tmux query failure as dead', () => {
     throw new Error('pane missing');
   });
   assert(alive === false, 'returns false when tmux target is gone');
+});
+
+test('isProcessAlive uses kill zero liveness', () => {
+  assert(isProcessAlive(process.pid) === true, 'current process is alive');
+  assert(isProcessAlive(99999999) === false, 'unlikely pid is not alive');
 });

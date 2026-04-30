@@ -9,9 +9,9 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 
 - ✅ **Phase 1** (daemon behind `BRAIN_WATCHER_MODE=daemon`, default still `bash`).
 - ✅ **Phase 2.1, 2.2, 2.4** (failureTracker → SQLite, `process.kill(pid, 0)` standardization, watchdog graceful shutdown).
-- ✅ **Phase 3.1, 3.3, 3.4, 3.5** (`src/constants.ts`, env allowlist, per-spawn 0o700 tmp dirs, per-runtime `STARTUP_GRACE_MS`).
+- ✅ **Phase 3.1, 3.2, 3.3, 3.4, 3.5** — all of Phase 3 done. Constants extracted, execFile migration (126 sites), env allowlist, 0o700 tmp dirs, per-runtime `STARTUP_GRACE_MS`.
 - ✅ **Phase 5.1** (spawn-recovery unit tests, 97.1% named-function line coverage).
-- ⏭ **Next:** 3.2 (execFile migration) → 5.3 (spawn metrics) → 5.2 (integration test). ~half-day of work.
+- ⏭ **Next:** 5.3 (spawn metrics) → 5.2 (integration test). ~3 hours of work.
 - ⏸ **Blocked on burn-in:** 2.3, 4.1, 4.2, 4.3 — wait until `BRAIN_WATCHER_MODE=daemon` runs cleanly in real Hermes workflows for ~2 weeks, then flip default + delete bash in a follow-up PR.
 - ⏸ **Deferred indefinitely:** 5.4 (current 47-line logger is fine).
 
@@ -38,7 +38,7 @@ Approach: **depth-first on the highest-leverage item, learn, then expand.**
 | 2.3 | tmux `pane-died` hook | ⏸ | wait until daemon is default |
 | 2.4 | Watchdog SIGTERM handler | ✅ | graceful SIGINT/SIGTERM shutdown |
 | 3.1 | `src/constants.ts` | ✅ | shared retry/backoff constants |
-| 3.2 | `execFile` migration | ⏸ | parallelizable |
+| 3.2 | `execFile` migration | ✅ | 126 sites migrated; `tmux()` + `git()` helpers; zero `execSync` calls in src/ |
 | 3.3 | Env allowlist | ✅ | `src/agent-env.ts`; closes spawn-recovery `process.env` leak |
 | 3.4 | `mkdtemp` 0o700 | ✅ | per-spawn dirs mode 0o700, cleanup uses freshest-mtime |
 | 3.5 | Per-runtime `STARTUP_GRACE_MS` | ✅ | runtime-specific startup grace |
@@ -165,13 +165,18 @@ Mechanical and isolated — these can run in parallel via subagents once Phase 1
 - [x] Migrate imports in `watchdog.ts` and `spawn-recovery.ts`. Reconcile drifted values (`BACKOFF_BASE_SEC=15` vs `BACKOFF_BASE_MS=500` represent different windows — pick the right one for each call site).
 - [x] Verify: tsc clean; agent backoff behavior unchanged in the smoke.
 
-### 3.2 Replace `execSync` with `execFile` everywhere ⏸
-~50 callsites, mostly tmux invocations. Eliminates shell injection risk and unblocks the event loop.
-- [ ] Audit: `grep -n execSync src/` to enumerate.
-- [ ] Categorize: which calls take user-controlled args (security concern) vs. fixed strings (just slow).
-- [ ] Migrate the security-relevant ones first (anything with `${target}`, `${paneId}`, `${tmuxName}` etc.).
-- [ ] Migrate the rest mechanically.
-- [ ] Verify: tsc clean, all unit tests pass, smoke flag-off and flag-on.
+### 3.2 Replace `execSync` with `execFile` everywhere ✅
+~50 was the estimate; actuals were **126 sites** across 9 files. Zero `execSync()` calls remain in src/ (only one comment-reference inside `tmux-runtime.ts` documenting the migration).
+- [x] Audited via `grep -rn execSync src/`.
+- [x] Categorized: tmux/git/gh/ps/cat/test calls. Security-relevant sites (`${target}`/`${paneId}`/`${tmuxName}`/`${branch}`/`${filePath}`) all now use explicit argv.
+- [x] New helpers in `src/tmux-runtime.ts`: `tmux(args, opts?)` and `tmuxTry(args, opts?)` collapse ~70 callsites.
+- [x] Local `git(args, cwd, opts?)` + `gitTry(args, cwd)` helpers in `src/index.ts` and `src/tools/git.ts` cover ~40 git/gh sites.
+- [x] Pipe replacements: `tmux list-panes | wc -l` → `tmux(['list-panes']).split('\n').filter(Boolean).length`.
+- [x] Alternation replacements: `git remote get-url origin || git remote get-url upstream` → `gitTry(['remote', 'get-url', 'origin']) || gitTry(['remote', 'get-url', 'upstream'])`.
+- [x] Shell-of-shell replacements: `cat ${sh(filePath)}` → `readFileSync(resolve(room, filePath))`. `test -d ${sh(path)}` → `existsSync(path) && lstatSync(path).isDirectory()`. `rm -f "${promptFile}"` → `unlinkSync(promptFile)`.
+- [x] `ps -o state= -p ${pid} 2>/dev/null` in `watchdog.ts:getProcessInfo` → `execFileSync('ps', ['-o', 'state=', '-p', String(pid)], { stdio: ['ignore', 'pipe', 'ignore'] })`.
+- [x] `npx tsc --noEmit 2>&1` in `gate.ts` → `execFileSync('npx', ['tsc', '--noEmit'], { stdio: ['ignore', 'pipe', 'pipe'] })`.
+- [x] Verified: `tsc --noEmit` clean, 265/265 tests pass, agent-watcher smoke passes end-to-end with daemon flag on.
 
 ### 3.3 Explicit env allowlist for spawned agents ✅
 `spawn-recovery.ts:592` was passing full `process.env` to children — leaked deployment secrets (RAILWAY_TOKEN, CF_API_TOKEN, GITHUB_TOKEN, etc.) into every agent.

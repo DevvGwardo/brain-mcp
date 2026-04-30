@@ -13,7 +13,7 @@
  *   brain-conductor --config pipeline.json
  */
 
-import { execSync, spawn as spawnProcess } from 'node:child_process';
+import { spawn as spawnProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -27,7 +27,7 @@ import { runGateAndNotify, type GateResult } from './gate.js';
 import { resolvePiModelSpec } from './model-resolution.js';
 import { runPiCoreAgent } from './pi-core-agent.js';
 import { reconcileSessionExit } from './spawn-recovery.js';
-import { registerTmuxSessionRuntime } from './tmux-runtime.js';
+import { registerTmuxSessionRuntime, tmux, tmuxTry } from './tmux-runtime.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from './agent-watcher.js';
 
 // ── ANSI helpers ──
@@ -370,9 +370,7 @@ function spawnAgent(
     ].join(' ');
 
     // Spawn tmux pane
-    const paneId = execSync(
-      `tmux split-window -h -P -F '#{pane_id}' "${piCmd}"`
-    ).toString().trim();
+    const paneId = tmux(['split-window', '-h', '-P', '-F', '#{pane_id}', piCmd]);
 
     applyLayout(paneId, agentIndex);
 
@@ -428,9 +426,7 @@ printf '%s\n' "pane_closed" > "$STATE_FILE"
     const pyCmd = `cd ${sh(workspaceCwd)} && env ${envParts.join(' ')} PYTHONPATH=${sh(agentsDir())} ${sh(pyBin)} ${sh(pyScript)}`;
 
     // Spawn tmux pane
-    const paneId = execSync(
-      `tmux split-window -h -P -F '#{pane_id}' "${pyCmd}"`
-    ).toString().trim();
+    const paneId = tmux(['split-window', '-h', '-P', '-F', '#{pane_id}', pyCmd]);
 
     applyLayout(paneId, agentIndex);
 
@@ -538,9 +534,7 @@ printf '%s\n' "pane_closed" > "$STATE_FILE"
     writeFileSync(promptFile, prompt);
 
     // Spawn tmux pane
-    const paneId = execSync(
-      `tmux split-window -h -P -F '#{pane_id}' "${claudeCmd}"`
-    ).toString().trim();
+    const paneId = tmux(['split-window', '-h', '-P', '-F', '#{pane_id}', claudeCmd]);
 
     applyLayout(paneId, agentIndex);
 
@@ -626,20 +620,23 @@ function applyLayout(paneId: string, agentIndex: number): void {
   const agentColor = AGENT_COLORS[agentIndex % AGENT_COLORS.length];
   try {
     let paneCount = 2;
-    try { paneCount = parseInt(execSync('tmux list-panes | wc -l').toString().trim(), 10) || 2; } catch { /* default */ }
+    try {
+      const lines = tmux(['list-panes']).split('\n').filter(Boolean);
+      paneCount = lines.length || 2;
+    } catch { /* default */ }
 
     if (paneCount > 4) {
-      execSync('tmux select-layout tiled');
+      tmux(['select-layout', 'tiled']);
     } else if (paneCount <= 2) {
-      execSync('tmux select-layout even-horizontal');
+      tmux(['select-layout', 'even-horizontal']);
     } else {
-      execSync('tmux select-layout main-vertical');
-      try { execSync('tmux resize-pane -t "{top-left}" -x 40%'); } catch { /* older tmux */ }
+      tmux(['select-layout', 'main-vertical']);
+      tmuxTry(['resize-pane', '-t', '{top-left}', '-x', '40%']);
     }
-    try { execSync('tmux select-layout -E'); } catch { /* tmux 3.1+ */ }
-    try { execSync(`tmux set-option -p -t "${paneId}" pane-border-style 'fg=${agentColor}'`); } catch { /* tmux 3.2+ */ }
-    execSync(`tmux set-option -w pane-active-border-style 'fg=#9333EA,bold'`);
-    execSync(`tmux select-pane -t '{top-left}'`);
+    tmuxTry(['select-layout', '-E']);
+    tmuxTry(['set-option', '-p', '-t', paneId, 'pane-border-style', `fg=${agentColor}`]);
+    tmux(['set-option', '-w', 'pane-active-border-style', 'fg=#9333EA,bold']);
+    tmux(['select-pane', '-t', '{top-left}']);
   } catch { /* layout may vary */ }
 }
 
@@ -868,9 +865,7 @@ async function main() {
 
   // Verify tmux — but pi-core mode doesn't need tmux since agents run in-process
   if (config.mode !== 'pi-core') {
-    try {
-      execSync('tmux display-message -p ""', { stdio: 'ignore' });
-    } catch {
+    if (tmuxTry(['display-message', '-p', '']) === null) {
       console.error(`${C.red}Error:${C.reset} Not inside a tmux session. brain-conductor requires tmux for ${config.mode} mode. Use --pi-core for no-tmux execution.`);
       process.exit(1);
     }

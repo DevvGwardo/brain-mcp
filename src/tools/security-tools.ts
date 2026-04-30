@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { BrainDB } from '../db.js';
 
 // ── Schema helpers ──
@@ -97,9 +99,9 @@ Use the notify parameter to DM agents responsible for files with findings.`,
       if (!targetFiles) {
         try {
           // Get both staged and unstaged modified files
-          const staged = execSync('git diff --cached --name-only', { encoding: 'utf-8', cwd: room }).trim();
-          const unstaged = execSync('git diff --name-only', { encoding: 'utf-8', cwd: room }).trim();
-          const untracked = execSync('git ls-files --others --exclude-standard', { encoding: 'utf-8', cwd: room }).trim();
+          const staged = execFileSync('git', ['diff', '--cached', '--name-only'], { encoding: 'utf-8', cwd: room, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+          const unstaged = execFileSync('git', ['diff', '--name-only'], { encoding: 'utf-8', cwd: room, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+          const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], { encoding: 'utf-8', cwd: room, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
           const all = [staged, unstaged, untracked].flatMap(s => s.split('\n')).filter(f => f && !f.includes('node_modules') && !f.includes('.git'));
           targetFiles = [...new Set(all)];
         } catch { /* ignore */ }
@@ -135,7 +137,7 @@ Use the notify parameter to DM agents responsible for files with findings.`,
 
         let content = '';
         try {
-          content = execSync(`cat ${sh(filePath)}`, { encoding: 'utf-8', cwd: room, maxBuffer: 5 * 1024 * 1024 });
+          content = readFileSync(join(room, filePath), 'utf-8');
         } catch { continue; }
 
         const lines = content.split('\n');

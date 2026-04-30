@@ -7,8 +7,9 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { execSync, spawn } from 'node:child_process';
-import { mkdtempSync, openSync, rmSync, writeFileSync, closeSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, openSync, rmSync, unlinkSync, writeFileSync, closeSync } from 'node:fs';
+import { tmux, tmuxTry } from '../tmux-runtime.js';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -220,7 +221,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
 
       // Tmux modes require tmux
       if (!isHeadless) {
-        try { execSync('tmux display-message -p ""', { stdio: 'ignore' }); } catch {
+        if (tmuxTry(['display-message', '-p', '']) === null) {
           return {
             content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: 'Not inside a tmux session. Use layout="headless" for non-tmux environments.' }) }],
             isError: true,
@@ -329,29 +330,31 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
         let target: string;
 
         if (spawnLayout === 'window') {
-          execSync(`tmux new-window -n "${tmuxName}" "${tmuxCmd}"`);
+          tmux(['new-window', '-n', tmuxName, tmuxCmd]);
           target = tmuxName;
         } else {
-          const paneId = execSync(`tmux split-window -h -P -F '#{pane_id}' "${tmuxCmd}"`).toString().trim();
+          const paneId = tmux(['split-window', '-h', '-P', '-F', '#{pane_id}', tmuxCmd]);
           const agentColor = options.AGENT_COLORS[incrementSpawnedAgentCount() % options.AGENT_COLORS.length];
 
           try {
             let paneCount = 2;
-            try { paneCount = parseInt(execSync(`tmux list-panes | wc -l`).toString().trim(), 10) || 2; } catch { /* default */ }
+            try {
+              paneCount = tmux(['list-panes']).split('\n').filter(Boolean).length || 2;
+            } catch { /* default */ }
 
             if (spawnLayout === 'tiled' || paneCount > 4) {
-              execSync('tmux select-layout tiled');
+              tmux(['select-layout', 'tiled']);
             } else if (paneCount <= 2) {
-              execSync('tmux select-layout even-horizontal');
+              tmux(['select-layout', 'even-horizontal']);
             } else {
-              execSync('tmux select-layout main-vertical');
-              try { execSync('tmux resize-pane -t "{top-left}" -x 40%'); } catch { /* older tmux */ }
+              tmux(['select-layout', 'main-vertical']);
+              tmuxTry(['resize-pane', '-t', '{top-left}', '-x', '40%']);
             }
-            try { execSync('tmux select-layout -E'); } catch { /* tmux 3.1+ */ }
-            try { execSync(`tmux set-option -p -t "${paneId}" pane-border-style 'fg=${agentColor}'`); } catch { /* tmux 3.2+ */ }
-            execSync(`tmux set-option -w pane-active-border-style 'fg=#9333EA,bold'`);
-            execSync(`tmux select-pane -t '{top-left}' -P 'bg=#0d0a1a'`);
-            execSync(`tmux select-pane -t '{top-left}'`);
+            tmuxTry(['select-layout', '-E']);
+            tmuxTry(['set-option', '-p', '-t', paneId, 'pane-border-style', `fg=${agentColor}`]);
+            tmux(['set-option', '-w', 'pane-active-border-style', 'fg=#9333EA,bold']);
+            tmux(['select-pane', '-t', '{top-left}', '-P', 'bg=#0d0a1a']);
+            tmux(['select-pane', '-t', '{top-left}']);
           } catch { /* layout may vary by tmux version */ }
 
           target = paneId;
@@ -468,7 +471,7 @@ rm -rf "$TMPDIR_PATH"
       } catch (err: any) {
         try {
           db.pulse(agentSessionId, 'failed', `spawn error: ${err.message || String(err)}`);
-          execSync(`rm -f "${promptFile}"`);
+          try { unlinkSync(promptFile); } catch { /* best effort */ }
         } catch { /* cleanup */ }
         return {
           content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: err.message || String(err) }) }],

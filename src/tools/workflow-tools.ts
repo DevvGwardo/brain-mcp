@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { join, resolve } from 'node:path';
 import { closeSync, openSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { spawn, execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { tmuxTry } from '../tmux-runtime.js';
 import { TaskRouter } from '../router.js';
 import { compileWorkflow } from '../workflow.js';
 import type { BrainDB } from '../db.js';
@@ -354,9 +355,7 @@ monitor progress with brain_agents, brain_plan_status, and the log file.`,
       startLeadWatchdog(sid);
 
       if (mode && mode !== 'pi-core') {
-        try {
-          execSync('tmux display-message -p ""', { stdio: 'ignore' });
-        } catch {
+        if (tmuxTry(['display-message', '-p', '']) === null) {
           return {
             content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: 'workflow_run with claude/pi/py mode requires tmux. Use mode="pi-core" or run inside tmux.' }) }],
             isError: true,

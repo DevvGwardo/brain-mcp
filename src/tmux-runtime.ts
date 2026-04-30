@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import type { BrainDB, Session } from './db.js';
 
 type ExecRunner = (command: string, options?: { encoding?: 'utf8'; stdio?: any }) => string | Buffer;
@@ -14,6 +14,33 @@ function runTmuxQuery(command: string, execRunner: ExecRunner = execSync): strin
   } catch {
     return null;
   }
+}
+
+/**
+ * Run tmux with explicit argv (no shell). Use this everywhere instead of
+ * `execSync(\`tmux ...\`)` — eliminates shell injection risk and skips a
+ * /bin/sh fork per call. Returns trimmed stdout.
+ *
+ * Caveat: when tmux's argv carries an embedded shell command (e.g.
+ * `split-window CMD`, `respawn-pane CMD`), that CMD is still parsed by
+ * tmux's own /bin/sh. Use sh()-quoting inside CMD construction; the
+ * outermost shell is gone but the inner one remains.
+ */
+export function tmux(args: string[], opts: { stdio?: any; cwd?: string } = {}): string {
+  const out = execFileSync('tmux', args, {
+    encoding: 'utf8',
+    stdio: opts.stdio ?? ['ignore', 'pipe', 'ignore'],
+    cwd: opts.cwd,
+  });
+  return String(out).trim();
+}
+
+/**
+ * Run tmux without throwing — returns null on non-zero exit / not-found.
+ * Useful for queries where "not present" is a valid signal.
+ */
+export function tmuxTry(args: string[], opts: { stdio?: any; cwd?: string } = {}): string | null {
+  try { return tmux(args, opts); } catch { return null; }
 }
 
 export function readTmuxTargetFromSession(session?: Pick<Session, 'metadata'> | null): string | null {

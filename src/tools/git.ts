@@ -1,6 +1,21 @@
 import { z } from 'zod';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync } from 'node:fs';
 import type { BrainDB } from '../db.js';
+
+function git(args: string[], cwd: string, opts: { encoding?: 'utf-8'; stdio?: any; maxBuffer?: number } = {}): string {
+  const out = execFileSync('git', args, {
+    cwd,
+    encoding: opts.encoding ?? 'utf-8',
+    stdio: opts.stdio ?? ['ignore', 'pipe', 'pipe'],
+    maxBuffer: opts.maxBuffer ?? 10 * 1024 * 1024,
+  });
+  return String(out);
+}
+
+function gitTry(args: string[], cwd: string): string | null {
+  try { return git(args, cwd); } catch { return null; }
+}
 
 // ── Schema helpers ──
 const cNum = () => z.preprocess(
@@ -62,32 +77,31 @@ Works in any language. Run from the repository root.`,
       ensureSession();
 
       // Get the diff
-      const fileArg = files ? files.join(' ') : '.';
-      let diffCmd = `git diff --cached ${fileArg}`;
+      const diffArgs: string[] = ['diff', '--cached'];
       if (!files) {
         // Stage everything first so we get a meaningful diff
-        try { execSync('git add -A', { stdio: 'pipe', cwd: room }); } catch { /* may fail if nothing to add */ }
-        diffCmd = 'git diff --cached';
+        try { git(['add', '-A'], room); } catch { /* may fail if nothing to add */ }
       } else {
+        diffArgs.push(...files);
         // Stage only specified files
         for (const f of files) {
-          try { execSync(`git add ${f}`, { stdio: 'pipe', cwd: room }); } catch { /* ignore */ }
+          try { git(['add', f], room); } catch { /* ignore */ }
         }
       }
 
       let diff = '';
       try {
-        diff = execSync(diffCmd, { encoding: 'utf-8', cwd: room, maxBuffer: 10 * 1024 * 1024 });
+        diff = git(diffArgs, room);
       } catch (e: any) {
         const errMsg = e.stderr || e.message || '';
         if (errMsg.includes('empty') || errMsg.includes('no changes')) {
           // Nothing staged — try unstaged diff
-          const unstagedDiff = execSync('git diff', { encoding: 'utf-8', cwd: room, maxBuffer: 10 * 1024 * 1024 });
+          const unstagedDiff = git(['diff'], room);
           if (!unstagedDiff.trim()) {
             return { content: [{ type: 'text' as const, text: JSON.stringify({ committed: false, error: 'No changes to commit. Stage files first with git add.' }) }] };
           }
           // Stage it
-          execSync('git add -A', { stdio: 'pipe', cwd: room });
+          git(['add', '-A'], room);
           diff = unstagedDiff;
         } else {
           return { content: [{ type: 'text' as const, text: JSON.stringify({ committed: false, error: `Git error: ${errMsg}` }) }] };
@@ -97,7 +111,7 @@ Works in any language. Run from the repository root.`,
       // Get list of changed files
       let changedFiles: string[] = [];
       try {
-        const statusOutput = execSync('git diff --cached --name-only', { encoding: 'utf-8', cwd: room });
+        const statusOutput = git(['diff', '--cached', '--name-only'], room);
         changedFiles = statusOutput.trim().split('\n').filter(f => f);
       } catch { /* ignore */ }
 
@@ -136,18 +150,15 @@ Works in any language. Run from the repository root.`,
       }
 
       // Build git command
-      const verifyFlag = no_verify ? ' --no-verify' : '';
-      let commitCmd: string;
-      if (amend) {
-        commitCmd = `git commit${verifyFlag} --amend -m ${sh(commitMsg)}`;
-      } else {
-        commitCmd = `git commit${verifyFlag} -m ${sh(commitMsg)}`;
-      }
+      const commitArgs: string[] = ['commit'];
+      if (no_verify) commitArgs.push('--no-verify');
+      if (amend) commitArgs.push('--amend');
+      commitArgs.push('-m', commitMsg);
 
       let commitHash = '';
       let commitError = '';
       try {
-        const out = execSync(commitCmd, { encoding: 'utf-8', cwd: room });
+        const out = git(commitArgs, room);
         // Extract hash from output
         const hashMatch = out.match(/\[([a-f0-9]+)\s/);
         commitHash = hashMatch ? hashMatch[1] : '';
@@ -201,7 +212,7 @@ Uses the gh CLI — requires GitHub CLI to be installed and authenticated.`,
       // Get current branch
       let branch = '';
       try {
-        branch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8', cwd: room }).trim();
+        branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], room).trim();
       } catch (e: any) {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ created: false, error: `Not a git repo: ${e.message}` }) }] };
       }
@@ -212,11 +223,12 @@ Uses the gh CLI — requires GitHub CLI to be installed and authenticated.`,
       // Detect repo
       let repoSlug = repo;
       if (!repoSlug) {
-        try {
-          const remote = execSync('git remote get-url origin 2>/dev/null || git remote get-url upstream 2>/dev/null', { encoding: 'utf-8', cwd: room }).trim();
-          const match = remote.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
-          if (match) repoSlug = match[1];
-        } catch { /* ignore */ }
+        const remote =
+          gitTry(['remote', 'get-url', 'origin'], room) ||
+          gitTry(['remote', 'get-url', 'upstream'], room) ||
+          '';
+        const match = remote.trim().match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+        if (match) repoSlug = match[1];
       }
       if (!repoSlug) {
         return { content: [{ type: 'text' as const, text: JSON.stringify({ created: false, error: 'Could not detect repo. Provide --repo in "owner/repo" format.' }) }] };
@@ -225,18 +237,15 @@ Uses the gh CLI — requires GitHub CLI to be installed and authenticated.`,
       // Get base branch
       let baseBranch = base;
       if (!baseBranch) {
-        try {
-          baseBranch = execSync('git rev-parse --abbrev-ref origin/HEAD 2>/dev/null', { encoding: 'utf-8', cwd: room }).trim().replace('origin/', '');
-        } catch {
-          baseBranch = 'main';
-        }
+        const headRef = gitTry(['rev-parse', '--abbrev-ref', 'origin/HEAD'], room);
+        baseBranch = headRef ? headRef.trim().replace('origin/', '') : 'main';
       }
 
       // Auto-generate title from commits if not provided
       let prTitle = title;
       if (!prTitle) {
         try {
-          const commits = execSync(`git log ${branch} ^${baseBranch} --oneline -10`, { encoding: 'utf-8', cwd: room });
+          const commits = git(['log', branch, `^${baseBranch}`, '--oneline', '-10'], room);
           const lines = commits.trim().split('\n').filter(l => l);
           if (lines.length > 0) {
             // Strip the hash prefix to get the message
@@ -251,7 +260,7 @@ Uses the gh CLI — requires GitHub CLI to be installed and authenticated.`,
       let prBody = body;
       if (!prBody) {
         try {
-          const commits = execSync(`git log ${branch} ^${baseBranch} --oneline -20`, { encoding: 'utf-8', cwd: room });
+          const commits = git(['log', branch, `^${baseBranch}`, '--oneline', '-20'], room);
           const lines = commits.trim().split('\n').map(l => l.replace(/^[a-f0-9]+\s+/, '').trim());
           if (lines.length > 0) {
             const changelog = lines.map(l => `- ${l}`).join('\n');
@@ -260,25 +269,26 @@ Uses the gh CLI — requires GitHub CLI to be installed and authenticated.`,
         } catch { /* empty body */ }
       }
 
-      // Build gh pr create command
-      const titleArg = `gh pr create -R ${sh(repoSlug)} --title ${sh(prTitle)} --base ${sh(baseBranch)}`;
-      const bodyArg = prBody ? ` --body ${sh(prBody)}` : '';
-      const reviewerArg = reviewers && reviewers.length > 0
-        ? reviewers.map((r: string) => ` --reviewer ${sh(r)}`).join('')
-        : '';
-      const labelArg = labels && labels.length > 0
-        ? labels.map((l: string) => ` --label ${sh(l)}`).join('')
-        : '';
-      const draftArg = draft ? ' --draft' : '';
-      const issueArg = issue ? ` --assignee @me --link ${sh(issue.startsWith('#') ? issue : `#${issue}`)}` : '';
-
-      const ghCmd = `${titleArg}${bodyArg}${reviewerArg}${labelArg}${draftArg}${issueArg}`;
+      // Build gh pr create argv
+      const ghArgs: string[] = ['pr', 'create', '-R', repoSlug, '--title', prTitle, '--base', baseBranch];
+      if (prBody) ghArgs.push('--body', prBody);
+      if (reviewers && reviewers.length > 0) {
+        for (const r of reviewers) ghArgs.push('--reviewer', r);
+      }
+      if (labels && labels.length > 0) {
+        for (const l of labels) ghArgs.push('--label', l);
+      }
+      if (draft) ghArgs.push('--draft');
+      if (issue) {
+        const issueRef = issue.startsWith('#') ? issue : `#${issue}`;
+        ghArgs.push('--assignee', '@me', '--link', issueRef);
+      }
 
       let prUrl = '';
       let prNumber = '';
       let prError = '';
       try {
-        const out = execSync(ghCmd, { encoding: 'utf-8', cwd: room, maxBuffer: 10 * 1024 * 1024 });
+        const out = execFileSync('gh', ghArgs, { encoding: 'utf-8', cwd: room, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 10 * 1024 * 1024 });
         // gh outputs the PR URL
         const urlMatch = out.match(/https:\/\/github\.com\/[^\s]+/);
         if (urlMatch) prUrl = urlMatch[0];
@@ -286,7 +296,7 @@ Uses the gh CLI — requires GitHub CLI to be installed and authenticated.`,
         if (numMatch) prNumber = numMatch[1];
         // If gh returned nothing useful, try to fetch the PR
         if (!prUrl) {
-          const listOut = execSync(`gh pr list -R ${sh(repoSlug)} --head ${sh(branch)} --json number,url --jq '.[0]'`, { encoding: 'utf-8', cwd: room });
+          const listOut = execFileSync('gh', ['pr', 'list', '-R', repoSlug, '--head', branch, '--json', 'number,url', '--jq', '.[0]'], { encoding: 'utf-8', cwd: room, stdio: ['ignore', 'pipe', 'pipe'] });
           const prInfo = JSON.parse(listOut);
           if (prInfo) { prUrl = prInfo.url; prNumber = String(prInfo.number); }
         }
@@ -339,7 +349,7 @@ and reports what would be deleted before acting.`,
 
       // 1. Prune remote references
       try {
-        execSync('git fetch --prune', { stdio: 'pipe', cwd: room });
+        git(['fetch', '--prune'], room);
         results.push('Pruned remote references');
       } catch (e: any) {
         errors.push(`git fetch --prune: ${e.message}`);
@@ -348,14 +358,14 @@ and reports what would be deleted before acting.`,
       // 2. Find gone branches
       let goneBranches: string[] = [];
       try {
-        const out = execSync('git branch -vv', { encoding: 'utf-8', cwd: room });
+        const out = git(['branch', '-vv'], room);
         goneBranches = out
           .split('\n')
           .filter(line => line.includes(': gone]'))
           .map(line => line.trim().replace(/^\*\s+/, '').split(/\s+/)[0])
           .filter(b => b && b !== 'HEAD');
         // Filter out current branch
-        const current = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8', cwd: room }).trim();
+        const current = git(['rev-parse', '--abbrev-ref', 'HEAD'], room).trim();
         goneBranches = goneBranches.filter(b => b !== current);
       } catch (e: any) {
         errors.push(`git branch -vv: ${e.message}`);
@@ -367,8 +377,7 @@ and reports what would be deleted before acting.`,
       if (goneBranches.length > 0) {
         for (const branch of goneBranches) {
           try {
-            const delFlag = force ? '-D' : '-d';
-            execSync(`git branch ${delFlag} ${branch}`, { stdio: 'pipe', cwd: room });
+            git(['branch', force ? '-D' : '-d', branch], room);
             deletedBranches.push(branch);
           } catch (e: any) {
             skippedBranches.push(`${branch} (${e.message})`);
@@ -380,19 +389,16 @@ and reports what would be deleted before acting.`,
       const deletedWorktrees: string[] = [];
       if (delete_worktrees) {
         try {
-          const worktreeList = execSync('git worktree list --porcelain', { encoding: 'utf-8', cwd: room });
+          const worktreeList = git(['worktree', 'list', '--porcelain'], room);
           const lines = worktreeList.split('\n');
           for (let i = 0; i < lines.length; i++) {
             if (lines[i]?.startsWith('worktree ')) {
               const path = lines[i].replace('worktree ', '').replace(/^./, '').replace(/.$/, '');
               // Check if it's stale (path no longer exists)
-              try {
-                execSync(`test -d ${sh(path)}`, { stdio: 'pipe', cwd: room });
-              } catch {
-                // Directory doesn't exist — prune it
+              if (!existsSync(path) || !lstatSync(path).isDirectory()) {
                 if (!dryRun) {
                   try {
-                    execSync(`git worktree remove ${sh(path)}`, { stdio: 'pipe', cwd: room });
+                    git(['worktree', 'remove', path], room);
                     deletedWorktrees.push(path);
                   } catch { /* skip */ }
                 } else {

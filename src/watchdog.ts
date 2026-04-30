@@ -12,7 +12,7 @@
 
 import { BrainDB, type AgentFailureDeathType } from './db.js';
 import { randomUUID } from 'node:crypto';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, rmSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -113,8 +113,8 @@ function cleanupStaleTempFiles(): number {
 function getProcessInfo(pid: number): { alive: boolean; state: string; cmd: string } | null {
   if (!isProcessAlive(pid)) return null;
   try {
-    const stateOut = execSync(`ps -o state= -p ${pid} 2>/dev/null`, { encoding: 'utf8', timeout: 3000 }).trim();
-    const cmdOut = execSync(`ps -o comm= -p ${pid} 2>/dev/null`, { encoding: 'utf8', timeout: 3000 }).trim();
+    const stateOut = execFileSync('ps', ['-o', 'state=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim();
+    const cmdOut = execFileSync('ps', ['-o', 'comm=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim();
     return {
       alive: true,
       state: stateOut,

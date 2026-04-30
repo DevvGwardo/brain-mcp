@@ -12,7 +12,7 @@
  * Zero Claude tokens — pure Node.js.
  */
 
-import { execSync, spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'url';
@@ -213,7 +213,7 @@ function runTests(cwd: string, timeout = PERFORMANCE_BASELINES.test_timeout): Te
   const projectRoot = findProjectRoot(cwd) || cwd;
 
   try {
-    const output = execSync(`${testCmd.cmd} ${testCmd.args.join(' ')}`, {
+    const output = execFileSync(testCmd.cmd, testCmd.args, {
       cwd: projectRoot,
       encoding: 'utf-8',
       timeout,
@@ -527,9 +527,10 @@ export function runGate(db: BrainDB, room: string, cwd: string): GateResult {
 
   if (hasTsConfig) {
     try {
-      execSync('npx tsc --noEmit 2>&1', {
+      execFileSync('npx', ['tsc', '--noEmit'], {
         cwd: projectRoot,
         encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
         timeout: PERFORMANCE_BASELINES.tsc_timeout,
       });
     } catch (err: any) {

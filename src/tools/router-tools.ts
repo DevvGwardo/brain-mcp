@@ -6,6 +6,7 @@ import { writeFileSync } from 'node:fs';
 import { spawn, execSync } from 'node:child_process';
 import { TaskRouter } from '../router.js';
 import type { BrainDB } from '../db.js';
+import { enqueueDaemonWatch, watcherModeFromEnv } from '../agent-watcher.js';
 
 // ── Schema helpers ──
 const cNum = () => z.preprocess(
@@ -200,7 +201,7 @@ Use this before brain_wake to auto-select the best model for the job.`,
             // hermes chat -q (single query mode) — non-interactive, uses MCP tools, exits when done
             // -Q suppresses TUI, only prints final response
             const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
-            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
+            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} chat -q ${sh(prompt)} -Q --yolo > ${sh(logFile)} 2>&1`;
           } else {
             // Generic CLI — pass prompt via stdin
             headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
@@ -300,7 +301,7 @@ fi
         } else if (cliType === 'hermes') {
           // Hermes interactive TUI mode — full agent experience in tmux pane
           const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
-          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)}`;
+          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} --yolo`;
         } else {
           tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}`;
         }
@@ -343,6 +344,25 @@ fi
         // Watcher: wait for ready, paste prompt, wait for exit or timeout
         // CLI-specific exit command and ready detection
         const exitCmd = cliType === 'hermes' ? '/quit' : '/exit';
+        if (watcherModeFromEnv() === 'daemon') {
+          const ready = cliType === 'hermes' ? ['hermes', '>>', '❯'] : ['❯'];
+          const fallback = cliType === 'hermes'
+            ? ['tools', 'model', 'ready']
+            : ['high effort', 'bypass perm', 'accept edits'];
+          enqueueDaemonWatch(db, {
+            pane_id: target,
+            session_id: agentSessionId,
+            ready_strategy: 'wait',
+            ready_markers: ready,
+            fallback_markers: fallback,
+            exit_command: exitCmd,
+            kill_grace_sec: 5,
+            timeout_sec: agentTimeout,
+            prompt_path: promptFile,
+            buffer_name: bufferName,
+            finalizer_kind: 'reconcile',
+          });
+        } else {
         const readyPatterns = cliType === 'hermes'
           ? `echo "$CONTENT" | grep -q "hermes\\|>>\\|❯" 2>/dev/null`
           : `echo "$CONTENT" | LC_ALL=C grep -qF $'\\xe2\\x9d\\xaf' 2>/dev/null`;
@@ -408,6 +428,7 @@ rm -f "${watcherFile}"
           try { db.markDone(agentSessionId, -1, true, `watcher failed: ${err.message}`); } catch { /* best effort */ }
         });
         watcher.unref();
+        }
 
         const layoutDesc: Record<string, string> = {
           vertical: 'stacked top/bottom',

@@ -26,6 +26,7 @@ import { resolvePiModelSpec } from './model-resolution.js';
 import { runPiCoreAgent } from './pi-core-agent.js';
 import { reconcileSessionExit } from './spawn-recovery.js';
 import { registerTmuxSessionRuntime } from './tmux-runtime.js';
+import { enqueueDaemonWatch, watcherModeFromEnv } from './agent-watcher.js';
 
 // ── ANSI helpers ──
 
@@ -381,10 +382,23 @@ function spawnAgent(
 
     applyLayout(paneId, agentIndex);
 
-    // Simple timeout watcher (records exit code on agent exit)
-    const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
-    const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
-    const watcherContent = `#!/bin/bash
+    registerTmuxSessionRuntime(db, agentSessionId, paneId);
+    if (watcherModeFromEnv() === 'daemon') {
+      enqueueDaemonWatch(db, {
+        pane_id: paneId,
+        session_id: agentSessionId,
+        ready_strategy: 'skip',
+        exit_command: 'C-c',
+        kill_grace_sec: 2,
+        timeout_sec: config.timeout,
+        cleanup_paths: [systemFile],
+        finalizer_kind: 'reconcile',
+      });
+    } else {
+      // Simple timeout watcher (records exit code on agent exit)
+      const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
+      const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
+      const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 ABSOLUTE_TIMEOUT=${config.timeout}
 START_TIME=$(date +%s)
@@ -405,10 +419,10 @@ done
 printf '%s\n' "pane_closed" > "$STATE_FILE"
 rm -f "${watcherFile}" "${systemFile}"
 `;
-    writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
-    const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-    registerTmuxSessionRuntime(db, agentSessionId, paneId);
-    attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
+      writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
+      const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
+      attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
+    }
 
   } else if (config.mode === 'py') {
     // ── Python agent mode ──
@@ -430,11 +444,23 @@ rm -f "${watcherFile}" "${systemFile}"
 
     applyLayout(paneId, agentIndex);
 
-    // Simple timeout watcher (records exit code on agent exit)
-    const ts = Date.now();
-    const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
-    const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
-    const watcherContent = `#!/bin/bash
+    registerTmuxSessionRuntime(db, agentSessionId, paneId);
+    if (watcherModeFromEnv() === 'daemon') {
+      enqueueDaemonWatch(db, {
+        pane_id: paneId,
+        session_id: agentSessionId,
+        ready_strategy: 'skip',
+        exit_command: 'C-c',
+        kill_grace_sec: 2,
+        timeout_sec: config.timeout,
+        finalizer_kind: 'reconcile',
+      });
+    } else {
+      // Simple timeout watcher (records exit code on agent exit)
+      const ts = Date.now();
+      const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
+      const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
+      const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 ABSOLUTE_TIMEOUT=${config.timeout}
 START_TIME=$(date +%s)
@@ -455,10 +481,10 @@ done
 printf '%s\n' "pane_closed" > "$STATE_FILE"
 rm -f "${watcherFile}"
 `;
-    writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
-    const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-    registerTmuxSessionRuntime(db, agentSessionId, paneId);
-    attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
+      writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
+      const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
+      attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
+    }
 
   } else {
     // ── Claude Code mode (original) ──
@@ -529,10 +555,26 @@ rm -f "${watcherFile}"
 
     applyLayout(paneId, agentIndex);
 
-    // Watcher: wait for ready, paste prompt, wait for exit or timeout
-    const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
-    const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
-    const watcherContent = `#!/bin/bash
+    registerTmuxSessionRuntime(db, agentSessionId, paneId);
+    if (watcherModeFromEnv() === 'daemon') {
+      enqueueDaemonWatch(db, {
+        pane_id: paneId,
+        session_id: agentSessionId,
+        ready_strategy: 'wait',
+        ready_markers: ['❯'],
+        fallback_markers: ['high effort', 'bypass perm', 'accept edits'],
+        exit_command: '/exit',
+        kill_grace_sec: 5,
+        timeout_sec: config.timeout,
+        prompt_path: promptFile,
+        buffer_name: bufferName,
+        finalizer_kind: 'reconcile',
+      });
+    } else {
+      // Watcher: wait for ready, paste prompt, wait for exit or timeout
+      const watcherFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.sh`);
+      const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${tmuxName}.state`);
+      const watcherContent = `#!/bin/bash
 TARGET="${paneId}"
 PROMPT="${promptFile}"
 BUFFER="${bufferName}"
@@ -582,10 +624,10 @@ done
 printf '%s\n' "pane_closed" > "$STATE_FILE"
 rm -f "${watcherFile}"
 `;
-    writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
-    const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-    registerTmuxSessionRuntime(db, agentSessionId, paneId);
-    attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
+      writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
+      const watcher = spawnProcess('bash', [watcherFile], { detached: true, stdio: 'ignore' });
+      attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
+    }
   }
 
   return agentSessionId;

@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { BrainDB } from '../db.js';
 import { minimalAgentPrompt } from '../autopilot.js';
 import { spawnWithRecovery, savePreSpawnCheckpoint, buildRecoveryContext, classifyError } from '../spawn-recovery.js';
+import { enqueueDaemonWatch, watcherModeFromEnv } from '../agent-watcher.js';
 import { cNum, cBool, cArr } from './schema-helpers.js';
 
 interface SwarmToolsOptions {
@@ -133,7 +134,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
             headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} claude -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
           } else if (cliType === 'hermes') {
             const hermesModelEnv = agentModel ? `HERMES_MODEL=${sh(agentModel)}` : '';
-            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
+            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes chat -q ${sh(prompt)} -Q --yolo > ${sh(logFile)} 2>&1`;
           } else {
             headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
           }
@@ -272,7 +273,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
             headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)} -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
           } else if (cliType === 'hermes') {
             const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
-            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
+            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} chat -q ${sh(prompt)} -Q --yolo > ${sh(logFile)} 2>&1`;
           } else {
             headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
           }
@@ -322,7 +323,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}${modelFlag} --dangerously-skip-permissions`;
         } else if (cliType === 'hermes') {
           const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
-          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)}`;
+          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} --yolo`;
         } else {
           tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}`;
         }
@@ -361,6 +362,25 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
 
         // Watcher script
         const exitCmd = cliType === 'hermes' ? '/quit' : '/exit';
+        if (watcherModeFromEnv() === 'daemon') {
+          const ready = cliType === 'hermes' ? ['hermes', '>>', '❯'] : ['❯'];
+          const fallback = cliType === 'hermes'
+            ? ['tools', 'model', 'ready']
+            : ['high effort', 'bypass perm', 'accept edits'];
+          enqueueDaemonWatch(db, {
+            pane_id: target,
+            session_id: agentSessionId,
+            ready_strategy: 'wait',
+            ready_markers: ready,
+            fallback_markers: fallback,
+            exit_command: exitCmd,
+            kill_grace_sec: 5,
+            timeout_sec: agentTimeout,
+            prompt_path: promptFile,
+            buffer_name: bufferName,
+            finalizer_kind: 'reconcile',
+          });
+        } else {
         const readyPatterns = cliType === 'hermes'
           ? `echo "$CONTENT" | grep -q "hermes\\|>>\\|❯" 2>/dev/null`
           : `echo "$CONTENT" | LC_ALL=C grep -qF $'\\xe2\\x9d\\xaf' 2>/dev/null`;
@@ -422,6 +442,7 @@ rm -f "${watcherFile}"
           try { db.pulse(agentSessionId, 'failed', `watcher failed: ${err.message}`); } catch { /* best effort */ }
         });
         watcher.unref();
+        }
 
         const layoutDesc: Record<string, string> = {
           vertical: 'stacked top/bottom',

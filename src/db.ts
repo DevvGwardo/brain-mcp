@@ -189,6 +189,54 @@ export interface ModelMetricRow {
   avg_tsc_errors: number | null;
 }
 
+// ── Pane Watches (agent-watcher daemon) ──
+
+export type PaneWatchStatus = 'ready_wait' | 'running' | 'terminal';
+export type PaneWatchTerminal = 'pane_closed' | 'timeout' | 'watcher_error';
+export type PaneWatchFinalizer = 'reconcile' | 'mark_failed';
+
+export interface PaneWatch {
+  id: number;
+  pane_id: string;
+  session_id: string;
+  status: PaneWatchStatus;
+  terminal_state: PaneWatchTerminal | null;
+  ready_strategy: 'skip' | 'wait';
+  ready_markers: string;       // JSON string[]
+  fallback_markers: string;    // JSON string[]
+  ready_attempts: number;
+  max_ready_ticks: number;
+  exit_command: string;        // 'C-c' | '/exit' | '/quit'
+  kill_grace_sec: number;
+  timeout_sec: number;
+  prompt_path: string | null;
+  buffer_name: string | null;
+  cleanup_paths: string;       // JSON string[]
+  finalizer_kind: PaneWatchFinalizer;
+  started_at: string;
+  ready_observed_at: string | null;
+  paste_completed_at: string | null;
+  terminal_at: string | null;
+  last_polled_at: string | null;
+}
+
+export interface PaneWatchInsert {
+  pane_id: string;
+  session_id: string;
+  status?: PaneWatchStatus;
+  ready_strategy?: 'skip' | 'wait';
+  ready_markers?: string[];
+  fallback_markers?: string[];
+  max_ready_ticks?: number;
+  exit_command?: string;
+  kill_grace_sec?: number;
+  timeout_sec?: number;
+  prompt_path?: string | null;
+  buffer_name?: string | null;
+  cleanup_paths?: string[];
+  finalizer_kind?: PaneWatchFinalizer;
+}
+
 // ── Spawn Metrics ──
 
 export interface SpawnMetric {
@@ -568,6 +616,45 @@ export class BrainDB {
         backoff_until INTEGER NOT NULL DEFAULT 0,
         escalation_level INTEGER NOT NULL DEFAULT 0,
         death_type TEXT NOT NULL DEFAULT 'unknown'
+      )
+    `);
+
+    // ── pane_watches: queue read by the agent-watcher daemon ──
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pane_watches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pane_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ready_wait' CHECK(status IN ('ready_wait','running','terminal')),
+        terminal_state TEXT CHECK(terminal_state IN ('pane_closed','timeout','watcher_error')),
+        ready_strategy TEXT NOT NULL DEFAULT 'skip' CHECK(ready_strategy IN ('skip','wait')),
+        ready_markers TEXT NOT NULL DEFAULT '[]',
+        fallback_markers TEXT NOT NULL DEFAULT '[]',
+        ready_attempts INTEGER NOT NULL DEFAULT 0,
+        max_ready_ticks INTEGER NOT NULL DEFAULT 60,
+        exit_command TEXT NOT NULL DEFAULT 'C-c',
+        kill_grace_sec INTEGER NOT NULL DEFAULT 5,
+        timeout_sec INTEGER NOT NULL DEFAULT 0,
+        prompt_path TEXT,
+        buffer_name TEXT,
+        cleanup_paths TEXT NOT NULL DEFAULT '[]',
+        finalizer_kind TEXT NOT NULL DEFAULT 'reconcile' CHECK(finalizer_kind IN ('reconcile','mark_failed')),
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        ready_observed_at TEXT,
+        paste_completed_at TEXT,
+        terminal_at TEXT,
+        last_polled_at TEXT
+      )
+    `);
+    try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_pane_watches_status ON pane_watches(status)"); } catch { /* already exists */ }
+    try { this.db.exec("CREATE INDEX IF NOT EXISTS idx_pane_watches_session ON pane_watches(session_id)"); } catch { /* already exists */ }
+
+    // ── daemon_locks: stale-tolerant single-instance locks for sibling daemons ──
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS daemon_locks (
+        name TEXT PRIMARY KEY,
+        pid INTEGER NOT NULL,
+        acquired_at TEXT NOT NULL DEFAULT (datetime('now'))
       )
     `);
 
@@ -1949,6 +2036,86 @@ export class BrainDB {
     const context_ledger = this.db.prepare('DELETE FROM context_ledger').run().changes;
     const checkpoints = this.db.prepare('DELETE FROM checkpoints').run().changes;
     return { messages, dms, state, claims, contracts, sessions, memory, task_graph, agent_metrics, context_ledger, checkpoints };
+  }
+
+  // ── Pane watches (consumed by agent-watcher daemon) ──
+
+  paneWatch_insert(p: PaneWatchInsert): number {
+    const status: PaneWatchStatus = p.status ?? (p.ready_strategy === 'wait' ? 'ready_wait' : 'running');
+    const result = this.db.prepare(
+      `INSERT INTO pane_watches (
+         pane_id, session_id, status, ready_strategy,
+         ready_markers, fallback_markers, max_ready_ticks,
+         exit_command, kill_grace_sec, timeout_sec,
+         prompt_path, buffer_name, cleanup_paths, finalizer_kind
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      p.pane_id, p.session_id, status, p.ready_strategy ?? 'skip',
+      JSON.stringify(p.ready_markers ?? []),
+      JSON.stringify(p.fallback_markers ?? []),
+      p.max_ready_ticks ?? 60,
+      p.exit_command ?? 'C-c', p.kill_grace_sec ?? 5, p.timeout_sec ?? 0,
+      p.prompt_path ?? null, p.buffer_name ?? null,
+      JSON.stringify(p.cleanup_paths ?? []),
+      p.finalizer_kind ?? 'reconcile',
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  paneWatch_active(): PaneWatch[] {
+    return this.db.prepare(
+      `SELECT * FROM pane_watches WHERE status != 'terminal' ORDER BY id`,
+    ).all() as PaneWatch[];
+  }
+
+  paneWatch_update(id: number, fields: Partial<Pick<PaneWatch,
+    'status' | 'terminal_state' | 'ready_attempts' |
+    'ready_observed_at' | 'paste_completed_at' | 'terminal_at' | 'last_polled_at'
+  >>): void {
+    const cols = Object.keys(fields);
+    if (cols.length === 0) return;
+    const set = cols.map((c) => `${c} = ?`).join(', ');
+    const vals = cols.map((c) => (fields as Record<string, unknown>)[c]);
+    this.db.prepare(`UPDATE pane_watches SET ${set} WHERE id = ?`).run(...vals, id);
+  }
+
+  paneWatch_get(id: number): PaneWatch | null {
+    const row = this.db.prepare(`SELECT * FROM pane_watches WHERE id = ?`).get(id) as PaneWatch | undefined;
+    return row ?? null;
+  }
+
+  // ── Daemon locks (stale-tolerant single-instance) ──
+
+  daemonLock_acquire(name: string, pid: number): { acquired: boolean; holder_pid: number | null } {
+    const tx = this.db.transaction(() => {
+      const existing = this.db.prepare(
+        `SELECT pid FROM daemon_locks WHERE name = ?`,
+      ).get(name) as { pid: number } | undefined;
+      if (existing) {
+        let alive = false;
+        try { process.kill(existing.pid, 0); alive = true; } catch { alive = false; }
+        if (alive) return { acquired: false, holder_pid: existing.pid };
+        // stale; replace
+      }
+      this.db.prepare(
+        `INSERT INTO daemon_locks (name, pid, acquired_at)
+         VALUES (?, ?, datetime('now'))
+         ON CONFLICT(name) DO UPDATE SET pid = excluded.pid, acquired_at = excluded.acquired_at`,
+      ).run(name, pid);
+      return { acquired: true, holder_pid: pid };
+    });
+    return tx();
+  }
+
+  daemonLock_release(name: string, pid: number): void {
+    this.db.prepare(
+      `DELETE FROM daemon_locks WHERE name = ? AND pid = ?`,
+    ).run(name, pid);
+  }
+
+  daemonLock_holder(name: string): number | null {
+    const row = this.db.prepare(`SELECT pid FROM daemon_locks WHERE name = ?`).get(name) as { pid: number } | undefined;
+    return row?.pid ?? null;
   }
 
   close(): void {

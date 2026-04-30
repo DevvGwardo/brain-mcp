@@ -19,6 +19,7 @@ import { spawnWithRecovery, cleanupSpawnTempFiles, reconcileSessionExit } from '
 import { renderTool } from './renderer.js';
 import { createServerLogger } from './server-log.js';
 import { registerTmuxSessionRuntime } from './tmux-runtime.js';
+import { enqueueDaemonWatch, watcherModeFromEnv } from './agent-watcher.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
 // Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
@@ -1402,7 +1403,7 @@ MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_c
             headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} claude -p${modelFlag} --dangerously-skip-permissions < ${sh(promptFile)} > ${sh(logFile)} 2>&1`;
           } else if (cliType === 'hermes') {
             const hermesModelEnv = agentModel ? `HERMES_MODEL=${sh(agentModel)}` : '';
-            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes chat -q ${sh(prompt)} -Q > ${sh(logFile)} 2>&1`;
+            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes chat -q ${sh(prompt)} -Q --yolo > ${sh(logFile)} 2>&1`;
           } else {
             headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
           }
@@ -1434,7 +1435,7 @@ MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_c
           tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} claude${modelFlag} --dangerously-skip-permissions`;
         } else if (cliType === 'hermes') {
           const hermesModelEnv = agentModel ? `HERMES_MODEL=${sh(agentModel)}` : '';
-          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes`;
+          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes --yolo`;
         } else {
           tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}`;
         }
@@ -1480,16 +1481,36 @@ MiniMax/Claude hint: if the user asks for "tmux_swarm", "brain_swarm", "claude_c
         } catch { /* layout may vary */ }
 
         const exitCmd = cliType === 'hermes' ? '/quit' : '/exit';
-        const readyPatterns = cliType === 'hermes'
-          ? `echo "$CONTENT" | grep -q "hermes\\|>>\\|❯" 2>/dev/null`
-          : `echo "$CONTENT" | LC_ALL=C grep -qF $'\\xe2\\x9d\\xaf' 2>/dev/null`;
-        const fallbackReady = cliType === 'hermes'
-          ? `echo "$CONTENT" | grep -q "tools\\|model\\|ready" 2>/dev/null`
-          : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
         const bufferName = `brain-${ts}-${sanitizeName(agentName)}`;
-        const watcherFile = join(tmpdir(), `brain-watch-${ts}-${sanitizeName(agentName)}.sh`);
-        const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${sanitizeName(agentName)}.state`);
-        const watcherContent = `#!/bin/bash
+        registerTmuxSessionRuntime(db, agentSessionId, target);
+        if (watcherModeFromEnv() === 'daemon') {
+          const ready = cliType === 'hermes' ? ['hermes', '>>', '❯'] : ['❯'];
+          const fallback = cliType === 'hermes'
+            ? ['tools', 'model', 'ready']
+            : ['high effort', 'bypass perm', 'accept edits'];
+          enqueueDaemonWatch(db, {
+            pane_id: target,
+            session_id: agentSessionId,
+            ready_strategy: 'wait',
+            ready_markers: ready,
+            fallback_markers: fallback,
+            exit_command: exitCmd,
+            kill_grace_sec: 5,
+            timeout_sec: 3600,
+            prompt_path: promptFile,
+            buffer_name: bufferName,
+            finalizer_kind: 'reconcile',
+          });
+        } else {
+          const readyPatterns = cliType === 'hermes'
+            ? `echo "$CONTENT" | grep -q "hermes\\|>>\\|❯" 2>/dev/null`
+            : `echo "$CONTENT" | LC_ALL=C grep -qF $'\\xe2\\x9d\\xaf' 2>/dev/null`;
+          const fallbackReady = cliType === 'hermes'
+            ? `echo "$CONTENT" | grep -q "tools\\|model\\|ready" 2>/dev/null`
+            : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
+          const watcherFile = join(tmpdir(), `brain-watch-${ts}-${sanitizeName(agentName)}.sh`);
+          const watcherStateFile = join(tmpdir(), `brain-watch-${ts}-${sanitizeName(agentName)}.state`);
+          const watcherContent = `#!/bin/bash
 TARGET="${target}"
 PROMPT="${promptFile}"
 BUFFER="${bufferName}"
@@ -1539,10 +1560,10 @@ done
 printf '%s\n' "pane_closed" > "$STATE_FILE"
 rm -f "${watcherFile}"
 `;
-        writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
-        const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-        registerTmuxSessionRuntime(db, agentSessionId, target);
-        attachTmuxWatcherFinalizer(watcher, agentSessionId, watcherStateFile);
+          writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
+          const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
+          attachTmuxWatcherFinalizer(watcher, agentSessionId, watcherStateFile);
+        }
 
         spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
       } catch (err: any) {
@@ -2519,16 +2540,36 @@ fi
       // Watcher: wait for ready, paste prompt, wait for exit or timeout
       // CLI-specific exit command and ready detection
       const exitCmd = cliType === 'hermes' ? '/quit' : '/exit';
-      const readyPatterns = cliType === 'hermes'
-        ? `echo "$CONTENT" | grep -q "hermes\\|>>\\|❯" 2>/dev/null`
-        : `echo "$CONTENT" | LC_ALL=C grep -qF $'\\xe2\\x9d\\xaf' 2>/dev/null`;
-      const fallbackReady = cliType === 'hermes'
-        ? `echo "$CONTENT" | grep -q "tools\\|model\\|ready" 2>/dev/null`
-        : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
+      registerTmuxSessionRuntime(db, agentSessionId, target);
+      if (watcherModeFromEnv() === 'daemon') {
+        const ready = cliType === 'hermes' ? ['hermes', '>>', '❯'] : ['❯'];
+        const fallback = cliType === 'hermes'
+          ? ['tools', 'model', 'ready']
+          : ['high effort', 'bypass perm', 'accept edits'];
+        enqueueDaemonWatch(db, {
+          pane_id: target,
+          session_id: agentSessionId,
+          ready_strategy: 'wait',
+          ready_markers: ready,
+          fallback_markers: fallback,
+          exit_command: exitCmd,
+          kill_grace_sec: 5,
+          timeout_sec: agentTimeout,
+          prompt_path: promptFile,
+          buffer_name: bufferName,
+          finalizer_kind: 'reconcile',
+        });
+      } else {
+        const readyPatterns = cliType === 'hermes'
+          ? `echo "$CONTENT" | grep -q "hermes\\|>>\\|❯" 2>/dev/null`
+          : `echo "$CONTENT" | LC_ALL=C grep -qF $'\\xe2\\x9d\\xaf' 2>/dev/null`;
+        const fallbackReady = cliType === 'hermes'
+          ? `echo "$CONTENT" | grep -q "tools\\|model\\|ready" 2>/dev/null`
+          : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
 
-      const watcherFile = join(tmpdir(), `brain-watch-${ts}.sh`);
-      const watcherStateFile = join(tmpdir(), `brain-watch-${ts}.state`);
-      const watcherContent = `#!/bin/bash
+        const watcherFile = join(tmpdir(), `brain-watch-${ts}.sh`);
+        const watcherStateFile = join(tmpdir(), `brain-watch-${ts}.state`);
+        const watcherContent = `#!/bin/bash
 TARGET="${target}"
 PROMPT="${promptFile}"
 BUFFER="${bufferName}"
@@ -2581,11 +2622,11 @@ done
 printf '%s\n' "pane_closed" > "$STATE_FILE"
 rm -f "${watcherFile}"
 `;
-      writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
+        writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
 
-      const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-      registerTmuxSessionRuntime(db, agentSessionId, target);
-      attachTmuxWatcherFinalizer(watcher, agentSessionId, watcherStateFile);
+        const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
+        attachTmuxWatcherFinalizer(watcher, agentSessionId, watcherStateFile);
+      }
 
       const layoutDesc: Record<string, string> = {
         vertical: 'stacked top/bottom',

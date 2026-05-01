@@ -153,7 +153,7 @@ class Orchestrator:
         log_file = os.path.join(tempfile.gettempdir(), f"brain-agent-{agent_sid[:8]}.log")
         with open(log_file, "w") as log_f:
             proc = subprocess.Popen(
-                ["hermes", "chat", "-q", prompt, "-Q"],
+                ["hermes", "chat", "-q", prompt, "-Q", "--yolo"],
                 cwd=self.cwd,
                 env=env,
                 stdout=log_f,

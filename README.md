@@ -1,6 +1,8 @@
 <div align="center">
 
-<br>
+<p align="center">
+  <img src="docs/brain-mcp-banner.png" alt="Hermes Brain banner" width="100%">
+</p>
 
 # Hermes Brain
 
@@ -111,109 +113,17 @@ hermes> Use register, then wake to spawn 3 agents
 
 ## How It Works
 
-```mermaid
-graph TB
-    subgraph "Python Conductor"
-        CLI["hermes-brain CLI"]
-        ORCH["Orchestrator<br/><small>spawn · wait · gate · retry</small>"]
-    end
-
-    subgraph "Hermes Agents"
-        direction LR
-        H1["Agent 1<br/><small>hermes -q</small>"]
-        H2["Agent 2<br/><small>hermes -q</small>"]
-        H3["Agent 3<br/><small>hermes -q</small>"]
-    end
-
-    CLI --> ORCH
-    ORCH -->|spawn| H1
-    ORCH -->|spawn| H2
-    ORCH -->|spawn| H3
-
-    subgraph "Brain (shared SQLite)"
-        DB[("brain.db")]
-        PULSE["Heartbeats"]
-        MX["Mutex Locks"]
-        KV["Shared State"]
-        CON["Contracts"]
-        MEM["Memory"]
-        PLAN["Task DAG"]
-    end
-
-    ORCH <--> DB
-    H1 <--> DB
-    H2 <--> DB
-    H3 <--> DB
-
-    subgraph "Integration Gate"
-        GATE["tsc · mypy · cargo · go vet"]
-        ROUTE["DM errors → agents"]
-    end
-
-    ORCH --> GATE
-    GATE --> ROUTE
-    ROUTE -.->|DM| H1
-    ROUTE -.->|DM| H2
-
-    style CLI fill:#9333EA,stroke:#7C3AED,color:#fff
-    style ORCH fill:#9333EA,stroke:#7C3AED,color:#fff
-    style H1 fill:#3B82F6,stroke:#2563EB,color:#fff
-    style H2 fill:#10B981,stroke:#059669,color:#fff
-    style H3 fill:#F59E0B,stroke:#D97706,color:#000
-    style DB fill:#1E293B,stroke:#334155,color:#fff
-    style GATE fill:#EF4444,stroke:#DC2626,color:#fff
-```
+<p align="center">
+  <img src="docs/brain-mcp-diagram-how-it-works.png" alt="How It Works diagram" width="90%">
+</p>
 
 ### Architecture
 
 This diagram shows the internal architecture of brain-mcp and how its components interact:
 
-```mermaid
-graph TB
-    subgraph "External Clients"
-        HERMES["Hermes CLI"]
-        CLAUDE["Claude Code"]
-        ANY["Any MCP Client"]
-    end
-
-    subgraph "brain-mcp (Node.js)"
-        SERVER["src/index.ts<br/>MCP Request Router"]
-        CONDUCTOR["brain-conductor<br/>Zero-token Orchestration CLI"]
-        GATE["src/gate.ts<br/>Integration Gate"]
-    end
-
-    subgraph "pi-agent-core Runtime"
-        PI_CORE["src/pi-core-agent.ts<br/>In-process Agent Runner"]
-        PI_CORE_TOOLS["src/pi-core-tools.ts<br/>14 Brain Tools as AgentTools"]
-        PI_AGENT["pi-agent-core Agent<br/>model + tools + events"]
-    end
-
-    subgraph "BrainDB (SQLite)"
-        DB[("brain.db<br/>sessions, state, messages,<br/>claims, contracts, memory")]
-    end
-
-    HERMES & CLAUDE & ANY --> SERVER
-    SERVER <--> DB
-    SERVER --> CONDUCTOR
-    CONDUCTOR --> PI_CORE
-    PI_CORE --> PI_CORE_TOOLS
-    PI_CORE --> PI_AGENT
-    PI_CORE_TOOLS --> DB
-    PI_AGENT -->|beforeToolCall<br/>pulse| DB
-    CONDUCTOR --> GATE
-    GATE -->|DM errors| CONDUCTOR
-
-    style HERMES fill:#FF6B6B,stroke:#DC2626,color:#fff
-    style CLAUDE fill:#3B82F6,stroke:#2563EB,color:#fff
-    style ANY fill:#7C3AED,stroke:#6D28D9,color:#fff
-    style SERVER fill:#1E293B,stroke:#334155,color:#fff
-    style CONDUCTOR fill:#9333EA,stroke:#7C3AED,color:#fff
-    style GATE fill:#EF4444,stroke:#DC2626,color:#fff
-    style PI_CORE fill:#10B981,stroke:#059669,color:#fff
-    style PI_CORE_TOOLS fill:#059669,stroke:#047857,color:#fff
-    style PI_AGENT fill:#06B6D4,stroke:#0891B2,color:#fff
-    style DB fill:#1E293B,stroke:#334155,color:#fff
-```
+<p align="center">
+  <img src="docs/brain-mcp-diagram-architecture.png" alt="Architecture diagram" width="90%">
+</p>
 
 **pi-agent-core** is the LLM agent runtime — handles the model interaction loop, tool execution, and event subscription. **brain-mcp** provides the coordination layer (state, messaging, heartbeats, locks, contracts) as tools that pi agents call. The **conductor** ties it all together with phases, gates, and tmux layout.
 
@@ -389,27 +299,9 @@ This is the key to matching single-agent integration quality with a parallel fle
 
 ## Integration Gate
 
-```mermaid
-sequenceDiagram
-    participant O as Orchestrator
-    participant C as Compiler
-    participant DB as Brain DB
-    participant A as Agent
-
-    O->>C: Run tsc / mypy / cargo / go vet
-    C-->>O: Errors with file:line:message
-
-    O->>DB: Query: who claimed this file?
-    DB-->>O: Agent X owned src/api/routes.ts
-
-    O->>A: DM: "Fix these errors in your files"
-    Note over A: Agent reads DM on next pulse
-    Note over A: Fixes code, pulses done
-
-    O->>C: Re-run compiler
-    C-->>O: Clean
-    O->>DB: Record metrics
-```
+<p align="center">
+  <img src="docs/brain-mcp-diagram-integration-gate.png" alt="Integration Gate sequence diagram" width="90%">
+</p>
 
 The gate auto-detects the project language and runs the appropriate checker:
 
@@ -428,28 +320,9 @@ Errors are parsed, matched to the agent that claimed the failing file, and route
 
 The brain DB is shared across all MCP clients. A single project can have:
 
-```mermaid
-graph LR
-    subgraph "Fleet"
-        direction TB
-        HA["Hermes Agent<br/><small>fast local inference</small>"]
-        CC["Claude Code<br/><small>deep reasoning</small>"]
-        MM["MiniMax<br/><small>cheap boilerplate</small>"]
-    end
-
-    subgraph "Brain"
-        DB[("brain.db")]
-    end
-
-    HA <--> DB
-    CC <--> DB
-    MM <--> DB
-
-    style HA fill:#F59E0B,stroke:#D97706,color:#000
-    style CC fill:#9333EA,stroke:#7C3AED,color:#fff
-    style MM fill:#3B82F6,stroke:#2563EB,color:#fff
-    style DB fill:#1E293B,stroke:#334155,color:#fff
-```
+<p align="center">
+  <img src="docs/brain-mcp-diagram-mixed-fleets.png" alt="Mixed Fleets diagram" width="70%">
+</p>
 
 Route by task type. Use Hermes for routine work, Claude for architectural decisions, cheaper models for boilerplate — all coordinating through the same brain, sharing contracts, gates, memory.
 
@@ -513,49 +386,9 @@ MCP tool calls include JSON-RPC framing, stdio IPC, TypeScript tool dispatch, an
 
 ## Architecture Deep Dive
 
-```mermaid
-graph TB
-    subgraph "MCP Clients"
-        HA["hermes sessions"]
-        CC["claude sessions"]
-        PY["Python orchestrator"]
-    end
-
-    subgraph "MCP Layer"
-        M1["brain-mcp<br/><small>stdio server</small>"]
-    end
-
-    subgraph "Python API"
-        PYDB["hermes.db.BrainDB<br/><small>direct SQLite access</small>"]
-    end
-
-    subgraph "Storage"
-        DB[("~/.claude/brain/brain.db<br/><small>SQLite WAL</small>")]
-    end
-
-    HA --> M1
-    CC --> M1
-    PY --> PYDB
-    M1 --> DB
-    PYDB --> DB
-
-    subgraph "Tables"
-        T1["sessions · messages · dms"]
-        T2["state · claims · contracts"]
-        T3["memory · plans · metrics"]
-        T4["context_ledger · checkpoints"]
-    end
-
-    DB --- T1
-    DB --- T2
-    DB --- T3
-    DB --- T4
-
-    style HA fill:#F59E0B,stroke:#D97706,color:#000
-    style CC fill:#9333EA,stroke:#7C3AED,color:#fff
-    style PY fill:#3776AB,stroke:#2C5F8D,color:#fff
-    style DB fill:#10B981,stroke:#059669,color:#fff
-```
+<p align="center">
+  <img src="docs/brain-mcp-diagram-deep-dive.png" alt="Architecture Deep Dive diagram" width="90%">
+</p>
 
 **Design decisions:**
 
@@ -569,31 +402,9 @@ graph TB
 
 ## Spawned Agent Lifecycle (Hermes Headless)
 
-```mermaid
-stateDiagram-v2
-    [*] --> Spawned: hermes -q &
-    Spawned --> Initializing: MCP connected
-    Initializing --> Registered: brain_register
-    Registered --> ReadingContext: brain_get / brain_recall
-    ReadingContext --> CheckingContracts: brain_contract_get
-
-    state "Working Loop" as Loop {
-        CheckingContracts --> Claiming: brain_claim files
-        Claiming --> Editing: make changes
-        Editing --> Pulsing: brain_pulse (every 2-3 calls)
-        Pulsing --> ReadingDMs: DMs returned in pulse
-        ReadingDMs --> Editing: fix errors if any
-        Editing --> Publishing: brain_contract_set
-    }
-
-    Publishing --> FinalCheck: brain_contract_check
-    FinalCheck --> Publishing: mismatches found
-    FinalCheck --> Done: clean
-    Done --> Releasing: brain_release all files
-    Releasing --> Reporting: brain_pulse status=done
-    Reporting --> Exited: process ends
-    Exited --> [*]
-```
+<p align="center">
+  <img src="docs/brain-mcp-diagram-lifecycle.png" alt="Spawned Agent Lifecycle diagram" width="90%">
+</p>
 
 ---
 
@@ -601,25 +412,9 @@ stateDiagram-v2
 
 If an agent crashes or goes stale, the orchestrator spawns a replacement with full context:
 
-```mermaid
-sequenceDiagram
-    participant O as Orchestrator
-    participant DB as Brain DB
-    participant R as Replacement
-
-    Note over O,DB: Agent X went stale (no pulse 60s+)
-
-    O->>DB: Get X's progress, claims, messages
-    DB-->O: "was editing src/api, claimed 3 files"
-
-    O->>DB: Release X's claims
-    O->>DB: Record failure metric
-
-    O->>R: Spawn "X-r4521" with recovery prompt:
-    Note over R: "You're replacing X.<br/>Last progress: 'editing routes.ts'.<br/>Pick up where they left off."
-
-    R->>DB: brain_register, brain_claim, continue
-```
+<p align="center">
+  <img src="docs/brain-mcp-diagram-auto-recovery.png" alt="Auto-Recovery sequence diagram" width="90%">
+</p>
 
 The replacement inherits the original task, knows what files the failed agent touched, and has context about their last known progress.
 
@@ -627,31 +422,15 @@ The replacement inherits the original task, knows what files the failed agent to
 
 ## Database Schema
 
-```mermaid
-erDiagram
-    sessions ||--o{ messages : sends
-    sessions ||--o{ direct_messages : sends
-    sessions ||--o{ claims : owns
-    sessions ||--o{ contracts : publishes
-    sessions ||--o{ pulses : heartbeats
-    sessions ||--o{ context_ledger : logs
-    sessions ||--o{ checkpoints : saves
-    sessions ||--o{ metrics : records
+<p align="center">
+  <img src="docs/brain-mcp-diagram-er-schema.png" alt="Database Schema ER diagram" width="90%">
+</p>
 
-    sessions { text id PK text name text room text status text progress text last_heartbeat }
-    messages { int id PK text channel text room text sender text content text created_at }
-    direct_messages { int id PK text from_id text to_id text content bool read }
-    state { text key PK text scope text value text updated_by }
-    claims { text resource PK text owner_id text expires_at }
-    contracts { text module PK text agent_id json provides json expects }
-    memory { text id PK text room text topic text content text tags }
-    plans { text id PK text room json tasks json dependencies }
-    metrics { int id PK text agent_name text outcome int duration_ms }
-    context_ledger { int id PK text agent_id text entry_type text content text file_path }
-    checkpoints { text id PK text agent_id json working_state text summary }
-```
+## Database Schema Notes
 
 **Database location:** `~/.claude/brain/brain.db`
+
+The brain DB is a single [SQLite](https://sqlite.org) file with WAL mode enabled for concurrent access. 14 tables cover sessions, messaging, state, claims, contracts, memory, plans, metrics, and the context ledger.
 
 ---
 
@@ -692,24 +471,9 @@ The tools work identically in interactive mode, headless mode, and across mixed 
 
 Brain also supports spawning Claude Code sessions in tmux split panes for visual orchestration:
 
-```mermaid
-graph TB
-    subgraph "Your terminal"
-        direction LR
-        L["LEAD<br/><small>purple border</small>"]
-        W1["worker 1<br/><small>blue</small>"]
-        W2["worker 2<br/><small>emerald</small>"]
-        W3["worker 3<br/><small>amber</small>"]
-    end
-    L -->|brain_wake| W1
-    L -->|brain_wake| W2
-    L -->|brain_wake| W3
-
-    style L fill:#0d0a1a,stroke:#9333EA,color:#fff,stroke-width:3px
-    style W1 fill:#0F172A,stroke:#3B82F6,color:#fff
-    style W2 fill:#0F172A,stroke:#10B981,color:#fff
-    style W3 fill:#0F172A,stroke:#F59E0B,color:#fff
-```
+<p align="center">
+  <img src="docs/brain-mcp-diagram-tmux-warroom.png" alt="Claude Code tmux warroom diagram" width="80%">
+</p>
 
 From Claude Code, say *"Refactor the API with 3 agents"* — the lead splits the work, spawns 3 Claude sessions in tmux panes, each with a unique colored border, and coordinates through the brain.
 

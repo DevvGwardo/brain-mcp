@@ -107,6 +107,51 @@ const TEMP_FILE_PATTERNS = [
   }
 })();
 
+// ── Startup zombie cleanup ──────────────────────────────────────────────────
+// Kill any brain-mcp processes from previous gateway restarts that were orphaned.
+// These accumulate when the gateway (the MCP parent) restarts without properly
+// killing its MCP child processes.
+(function startupZombieCleanup() {
+  const myPid = process.pid;
+  const myEntry = process.argv[1]; // e.g. "/path/to/brain-mcp/dist/index.js"
+  if (!myEntry) return;
+
+  let killed = 0;
+  try {
+    // Use ps to find sibling brain-mcp processes running the same entry script
+    const output = execFileSync('ps', ['axo', 'pid,command'], { encoding: 'utf8', timeout: 5000 });
+    for (const line of output.split('\n')) {
+      const parts = line.trim().split(/\s+/);
+      const pid = parseInt(parts[0], 10);
+      if (!pid || pid === myPid) continue;
+      if (line.includes(myEntry)) {
+        try {
+          process.kill(pid, 'SIGTERM');
+          killed++;
+        } catch { /* already dead — skip */ }
+      }
+    }
+  } catch { /* ps may fail in constrained environments — best-effort */ }
+
+  // Wait briefly for graceful shutdown of siblings
+  if (killed > 0) {
+    const waitUntil = Date.now() + 2000;
+    while (Date.now() < waitUntil) {
+      let stillAlive = 0;
+      try {
+        const check = execFileSync('ps', ['axo', 'pid,command'], { encoding: 'utf8', timeout: 1000 });
+        for (const line of check.split('\n')) {
+          const pid = parseInt(line.trim().split(/\s+/)[0], 10);
+          if (!pid || pid === myPid) continue;
+          if (line.includes(myEntry)) stillAlive++;
+        }
+      } catch { break; }
+      if (stillAlive === 0) break;
+    }
+    serverLog.log(`startup zombie cleanup: SIGTERM sent to ${killed} orphaned brain-mcp process(es)`);
+  }
+})();
+
 let sessionId: string | null = process.env.BRAIN_SESSION_ID || null;
 let spawnedAgentCount = 0;
 

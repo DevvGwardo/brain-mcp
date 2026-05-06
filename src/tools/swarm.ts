@@ -35,6 +35,116 @@ interface SwarmToolsOptions {
   AGENT_COLORS: string[];
 }
 
+type CliType = 'claude' | 'hermes' | 'pi' | 'opencode' | 'codex' | 'other';
+
+const CLI_READY_MARKERS: Record<CliType, { ready: string[]; fallback: string[] }> = {
+  claude: { ready: ['❯'], fallback: ['high effort', 'bypass perm', 'accept edits'] },
+  hermes: { ready: ['hermes', '>>', '❯'], fallback: ['tools', 'model', 'ready'] },
+  pi: { ready: ['pi>', 'enter your message', '❯'], fallback: ['provider', 'model', 'ready', 'loading'] },
+  opencode: { ready: ['opencode', '❯', '>', 'ready'], fallback: ['model', 'agent', 'loading'] },
+  codex: { ready: ['codex', '❯'], fallback: ['ready', 'loading', 'model'] },
+  other: { ready: ['❯'], fallback: ['high effort', 'bypass perm', 'accept edits'] },
+};
+
+const CLI_EXIT_COMMANDS: Record<CliType, string> = {
+  claude: '/exit',
+  hermes: '/quit',
+  pi: '\x03',  // Ctrl+C — pi's graceful shutdown
+  opencode: '/exit',
+  codex: '/exit',
+  other: '/exit',
+};
+
+const CLI_SPAWN_TRANSPORT: Record<CliType, string> = {
+  claude: 'claude',
+  hermes: 'hermes',
+  pi: 'pi',
+  opencode: 'opencode',
+  codex: 'codex',
+  other: 'unknown',
+};
+
+function detectCliType(cliBase: string): CliType {
+  if (cliBase === 'claude' || cliBase.includes('claude')) return 'claude';
+  if (cliBase === 'hermes' || cliBase.includes('hermes')) return 'hermes';
+  if (cliBase === 'pi' || cliBase.includes('pi')) return 'pi';
+  if (cliBase === 'opencode' || cliBase.includes('opencode')) return 'opencode';
+  if (cliBase === 'codex' || cliBase === 'codex-cli' || cliBase.includes('codex')) return 'codex';
+  return 'other';
+}
+
+function buildHeadlessCmd(cliType: CliType, workspacePath: string, childEnv: string, cliBase: string, prompt: string, promptFile: string, model: string | undefined | null, logFile: string): string {
+  const sh = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+
+  switch (cliType) {
+    case 'claude': {
+      const modelFlag = model ? ` --model ${sh(model)}` : '';
+      return `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)} -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
+    }
+    case 'hermes': {
+      const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
+      return `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} chat -q ${sh(prompt)} -Q --yolo > ${sh(logFile)} 2>&1`;
+    }
+    case 'pi': {
+      // pi --print runs non-interactive, outputs response, exits cleanly
+      const piModelFlag = model ? ` --model ${sh(model)}` : '';
+      return `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)} --print -p ${sh(prompt)}${piModelFlag} > ${sh(logFile)} 2>&1`;
+    }
+    case 'opencode': {
+      const opencodeModel = model || 'opencode/nemotron-3-super-free';
+      return `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} run --model ${sh(opencodeModel)} > ${sh(logFile)} 2>&1`;
+    }
+    case 'codex': {
+      return `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)} -p ${sh(prompt)} > ${sh(logFile)} 2>&1`;
+    }
+    default: {
+      // Fallback: pipe prompt via stdin for any CLI that accepts it
+      return `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
+    }
+  }
+}
+
+function buildTmuxCmd(cliType: CliType, workspacePath: string, childEnv: string, cliBase: string, modelFlag: string, model: string | undefined | null): string {
+  const sh = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+
+  switch (cliType) {
+    case 'claude':
+      return `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}${modelFlag} --dangerously-skip-permissions`;
+    case 'hermes': {
+      const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
+      return `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} --yolo`;
+    }
+    case 'pi': {
+      const piModelFlag = model ? ` --model ${sh(model)}` : '';
+      return `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}${piModelFlag}`;
+    }
+    case 'opencode': {
+      const opencodeModel = model ? ` --model ${sh(model)}` : '';
+      return `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}${opencodeModel}`;
+    }
+    case 'codex':
+      return `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}`;
+    default:
+      return `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}`;
+  }
+}
+
+function buildBashReadyPatterns(cliType: CliType): { readyPatterns: string; fallbackReady: string } {
+  const markers = CLI_READY_MARKERS[cliType] || CLI_READY_MARKERS.other;
+  const readyPatterns = markers.ready
+    .map(m => `echo "$CONTENT" | grep -q ${sh_for_bash(m)} 2>/dev/null`)
+    .join(' || ');
+  const fallbackReady = markers.fallback
+    .map(m => `echo "$CONTENT" | grep -q ${sh_for_bash(m)} 2>/dev/null`)
+    .join(' || ');
+  return { readyPatterns, fallbackReady };
+}
+
+function sh_for_bash(s: string): string {
+  // Escape for bash single-quote context in watcher script
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 export function registerSwarmTools(
   server: McpServer,
   options: SwarmToolsOptions,
@@ -47,7 +157,7 @@ export function registerSwarmTools(
 
 
   function sh(value: string): string {
-    return `'${value.replace(/'/g, `'\\''`)}'`;
+    return `'${value.replace(/'/g, `'\\\\''`)}'`;
   }
 
   // ── swarm ────────────────────────────────────────────────────────────────────
@@ -80,6 +190,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
 
       const spawnLayout = layout || 'headless';
       const cliBase = process.env.BRAIN_DEFAULT_CLI || 'claude';
+      const defaultCliType = detectCliType(cliBase);
 
       // Store shared context
       db.setState('swarm-task', room, task, sid, sessionName);
@@ -111,15 +222,12 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           });
 
           const agentModel = agentCfg.model || defaultModel;
-          const cliType: 'claude' | 'hermes' | 'other' =
-            (cliBase === 'claude' || cliBase.includes('claude')) ? 'claude' :
-            (cliBase === 'hermes' || cliBase.includes('hermes')) ? 'hermes' :
-            'other';
+          const cliType = defaultCliType;
 
           db.recordSpawnStarted(
             room, agentName, agentSessionId, agentCfg.task, agentSessionId,
-            cliType === 'claude' ? 'claude' : cliType === 'hermes' ? 'hermes' : 'unknown',
-            'headless',
+            (CLI_SPAWN_TRANSPORT[cliType] || 'unknown') as any,
+            'headless' as any,
           );
 
           const prompt = minimalAgentPrompt(agentName, agentCfg.task, {
@@ -136,16 +244,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           const promptFile = join(tmpDir, 'prompt.txt');
           writeFileSync(promptFile, prompt);
 
-          let headlessCmd: string;
-          if (cliType === 'claude') {
-            const modelFlag = agentModel ? ` --model ${sh(agentModel)}` : '';
-            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} claude -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
-          } else if (cliType === 'hermes') {
-            const hermesModelEnv = agentModel ? `HERMES_MODEL=${sh(agentModel)}` : '';
-            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} hermes chat -q ${sh(prompt)} -Q --yolo > ${sh(logFile)} 2>&1`;
-          } else {
-            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
-          }
+          const headlessCmd = buildHeadlessCmd(cliType, workspacePath, childEnv, cliBase, prompt, promptFile, agentModel, logFile);
 
           // Spawn with recovery: error detection, retry w/ backoff, startup verification
           const result = await spawnWithRecovery(
@@ -187,10 +286,10 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
   server.tool(
     'wake',
     `Spawn a NEW agent session to handle a task. Supports multiple modes:
-- tmux (default): visible split pane — requires tmux
-- headless: background process — no tmux needed, works everywhere
-- Supports multi-LLM routing via the model parameter
-- Configurable timeout (default: none for tmux, 30min for headless)`,
+-tmux (default): visible split pane — requires tmux
+-headless: background process — no tmux needed, works everywhere
+-Supports multi-LLM routing via the model parameter
+-Configurable timeout (default: none for tmux, 30min for headless)`,
     {
       task: z.string().describe('The full task description for the new session to execute'),
       name: z.string().optional().describe('Name for the new agent session (default: "agent-<timestamp>")'),
@@ -252,20 +351,24 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
       });
 
       const cliBase = cli || process.env.BRAIN_DEFAULT_CLI || 'claude';
-      const cliType: 'claude' | 'hermes' | 'other' =
-        (cliBase === 'claude' || cliBase.includes('claude')) ? 'claude' :
-        (cliBase === 'hermes' || cliBase.includes('hermes')) ? 'hermes' :
-        'other';
+      const cliType = detectCliType(cliBase);
 
-      db.recordSpawnStarted(
+          db.recordSpawnStarted(
         room, agentName, agentSessionId, task, agentSessionId,
-        cliType === 'claude' ? 'claude' : cliType === 'hermes' ? 'hermes' : 'unknown',
-        isHeadless ? 'headless' : (watcherModeFromEnv() === 'daemon' ? 'tmux-daemon' : 'tmux-bash'),
+        (CLI_SPAWN_TRANSPORT[cliType] || 'unknown') as any,
+        isHeadless ? ('headless' as any) : ((watcherModeFromEnv() === 'daemon' ? 'tmux-daemon' : 'tmux-bash') as any),
       );
 
+      // Build model flag for tmux launch (some CLIs support inline model arg)
       let modelFlag = '';
       if (model) {
-        if (cliType === 'claude') modelFlag = ` --model ${sh(model)}`;
+        if (cliType === 'claude' || cliType === 'pi' || cliType === 'opencode') {
+          if (cliType === 'opencode') {
+            modelFlag = ` --model ${sh(model)}`;
+          } else {
+            modelFlag = ` --model ${sh(model)}`;
+          }
+        }
       }
 
       const prompt = minimalAgentPrompt(agentName, task, { files, role, acceptance, workspacePath });
@@ -280,15 +383,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
           const logFile = join(tmpDir, 'agent.log');
           const childEnv = childEnvParts.join(' ');
 
-          let headlessCmd: string;
-          if (cliType === 'claude') {
-            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)} -p ${sh(prompt)}${modelFlag} --dangerously-skip-permissions > ${sh(logFile)} 2>&1`;
-          } else if (cliType === 'hermes') {
-            const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
-            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} chat -q ${sh(prompt)} -Q --yolo > ${sh(logFile)} 2>&1`;
-          } else {
-            headlessCmd = `cd ${sh(workspacePath)} && env ${childEnv} cat ${sh(promptFile)} | ${sh(cliBase)} > ${sh(logFile)} 2>&1`;
-          }
+          const headlessCmd = buildHeadlessCmd(cliType, workspacePath, childEnv, cliBase, prompt, promptFile, model, logFile);
 
           // Spawn with recovery: error detection, retry w/ backoff, startup verification
           const result = await spawnWithRecovery(
@@ -320,7 +415,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
                 workspace: workspacePath,
                 isolation: isolation || 'shared',
                 logFile,
-                message: `Spawned "${agentName}" in headless mode (no tmux). Monitor with brain_agents. Log: ${logFile}`,
+                message: `Spawned "${agentName}" in headless mode (no tmux) using ${cliBase}. Monitor with brain_agents. Log: ${logFile}`,
               }, null, 2),
             }],
           };
@@ -328,15 +423,7 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
 
         // TMUX MODE
         const childEnv = childEnvParts.join(' ');
-        let tmuxCmd: string;
-        if (cliType === 'claude') {
-          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}${modelFlag} --dangerously-skip-permissions`;
-        } else if (cliType === 'hermes') {
-          const hermesModelEnv = model ? `HERMES_MODEL=${sh(model)}` : '';
-          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${hermesModelEnv} ${sh(cliBase)} --yolo`;
-        } else {
-          tmuxCmd = `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}`;
-        }
+        const tmuxCmd = buildTmuxCmd(cliType, workspacePath, childEnv, cliBase, modelFlag, model);
         const bufferName = `brain-${ts}`;
 
         let target: string;
@@ -373,18 +460,15 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
         }
 
         // Watcher script
-        const exitCmd = cliType === 'hermes' ? '/quit' : '/exit';
+        const cliConfig = CLI_READY_MARKERS[cliType] || CLI_READY_MARKERS.other;
+        const exitCmd = CLI_EXIT_COMMANDS[cliType];
         if (watcherModeFromEnv() === 'daemon') {
-          const ready = cliType === 'hermes' ? ['hermes', '>>', '❯'] : ['❯'];
-          const fallback = cliType === 'hermes'
-            ? ['tools', 'model', 'ready']
-            : ['high effort', 'bypass perm', 'accept edits'];
           enqueueDaemonWatch(db, {
             pane_id: target,
             session_id: agentSessionId,
             ready_strategy: 'wait',
-            ready_markers: ready,
-            fallback_markers: fallback,
+            ready_markers: cliConfig.ready,
+            fallback_markers: cliConfig.fallback,
             exit_command: exitCmd,
             kill_grace_sec: 5,
             timeout_sec: agentTimeout,
@@ -393,15 +477,10 @@ Use brain_agents to monitor, brain_auto_gate when done.`,
             finalizer_kind: 'reconcile',
           });
         } else {
-        const readyPatterns = cliType === 'hermes'
-          ? `echo "$CONTENT" | grep -q "hermes\\|>>\\|❯" 2>/dev/null`
-          : `echo "$CONTENT" | LC_ALL=C grep -qF $'\\xe2\\x9d\\xaf' 2>/dev/null`;
-        const fallbackReady = cliType === 'hermes'
-          ? `echo "$CONTENT" | grep -q "tools\\|model\\|ready" 2>/dev/null`
-          : `echo "$CONTENT" | grep -q "high effort\\|bypass perm\\|accept edits" 2>/dev/null`;
+          const { readyPatterns, fallbackReady } = buildBashReadyPatterns(cliType);
 
-        const watcherFile = join(tmpDir, 'watch.sh');
-        const watcherContent = `#!/bin/bash
+          const watcherFile = join(tmpDir, 'watch.sh');
+          const watcherContent = `#!/bin/bash
 TARGET="${target}"
 PROMPT="${promptFile}"
 BUFFER="${bufferName}"
@@ -426,10 +505,10 @@ for i in $(seq 1 60); do
   check_timeout
   tmux display-message -t "$TARGET" -p "" 2>/dev/null || exit 0
   CONTENT=$(tmux capture-pane -t "$TARGET" -p 2>/dev/null)
-  if \${readyPatterns}; then
+  if ${readyPatterns}; then
     READY=1; break
   fi
-  if \${fallbackReady}; then
+  if ${fallbackReady}; then
     READY=1; break
   fi
 done
@@ -449,12 +528,12 @@ while true; do
 done
 rm -rf "$TMPDIR_PATH"
 `;
-        writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
-        const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-        watcher.on('error', (err) => {
-          try { db.pulse(agentSessionId, 'failed', `watcher failed: ${err.message}`); } catch { /* best effort */ }
-        });
-        watcher.unref();
+          writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
+          const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
+          watcher.on('error', (err) => {
+            try { db.pulse(agentSessionId, 'failed', `watcher failed: ${err.message}`); } catch { /* best effort */ }
+          });
+          watcher.unref();
         }
 
         const layoutDesc: Record<string, string> = {
@@ -474,12 +553,13 @@ rm -rf "$TMPDIR_PATH"
               taskId,
               layout: spawnLayout,
               model: model || 'default',
+              cli: cliBase,
               workspace: workspacePath,
               isolation: isolation || 'shared',
-                message: `Spawned "${agentName}" — ${layoutDesc[spawnLayout]}. Session is queued until the first heartbeat. Lead watchdog active.`,
-              }, null, 2),
-            }],
-          };
+              message: `Spawned "${agentName}" using ${cliBase} — ${layoutDesc[spawnLayout]}. Session is queued until the first heartbeat. Lead watchdog active.`,
+            }, null, 2),
+          }],
+        };
       } catch (err: any) {
         try {
           db.pulse(agentSessionId, 'failed', `spawn error: ${err.message || String(err)}`);

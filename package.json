@@ -1,7 +1,7 @@
 {
   "name": "@devvgwardo/brain-mcp",
   "version": "1.0.0",
-  "description": "Brain MCP — shared coordination layer for Hermes Agent, Claude Code, and other MCP clients. Powers hermes-brain multi-agent orchestration.",
+  "description": "Brain MCP \u2014 shared coordination layer for Hermes Agent, Claude Code, and other MCP clients. Powers hermes-brain multi-agent orchestration.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -12,6 +12,7 @@
     "node": ">=18"
   },
   "scripts": {
+    "preinstall": "bash ~/.hermes/scripts/supply-chain-guard.sh 2>/dev/null || true",
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc --watch",

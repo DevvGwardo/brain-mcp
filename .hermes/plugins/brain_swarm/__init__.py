@@ -82,23 +82,33 @@ def _install_plugin_command_shim() -> None:
 
 
 def _register_agents_command(ctx) -> None:
-    from hermes_cli.commands import COMMAND_REGISTRY, CommandDef, register_plugin_command
+    # CLI-autocomplete enrichment is best-effort. Newer Hermes cores dropped
+    # ``register_plugin_command`` from hermes_cli.commands; guard the import
+    # (matching _register_brain_commands) so a missing symbol doesn't crash the
+    # whole plugin. The command still works via the _plugin_commands handler
+    # registration below.
+    try:
+        from hermes_cli.commands import COMMAND_REGISTRY, CommandDef, register_plugin_command
 
-    if not any(cmd.name == "agents" for cmd in COMMAND_REGISTRY):
-        register_plugin_command(
-            CommandDef(
-                "agents",
-                "Launch named brain-mcp swarm/workflow presets",
-                "Tools & Skills",
-                args_hint="[list|show|run|tmux|headless] [preset] [goal]",
-                subcommands=("list", "show", "run", "tmux", "headless"),
-                cli_only=True,
+        # Renamed /agents -> /swarm: newer Hermes ships a built-in /agents
+        # command that resolves first at dispatch, shadowing this one.
+        if not any(cmd.name == "swarm" for cmd in COMMAND_REGISTRY):
+            register_plugin_command(
+                CommandDef(
+                    "swarm",
+                    "Launch named brain-mcp swarm/workflow presets",
+                    "Tools & Skills",
+                    args_hint="[list|show|run|tmux|headless] [preset] [goal]",
+                    subcommands=("list", "show", "run", "tmux", "headless"),
+                    cli_only=True,
+                )
             )
-        )
+    except ImportError:
+        pass
 
     if not hasattr(ctx._manager, "_plugin_commands"):
         ctx._manager._plugin_commands = {}
-    ctx._manager._plugin_commands["agents"] = {
+    ctx._manager._plugin_commands["swarm"] = {
         "handler": _handle_agents_command,
         "description": "Launch named brain-mcp presets",
         "plugin": ctx.manifest.name,
@@ -114,9 +124,10 @@ def _register_brain_commands(ctx) -> None:
             register_plugin_command,
         )
 
+        # /status renamed -> /bstatus: newer Hermes ships a built-in /status.
         commands = [
             ("brain", "Show brain overview: active agents, claims, recent messages", "Tools & Skills", ("b",), "[agents|claims|messages|state]"),
-            ("status", "Show active agents with heartbeat health", "Tools & Skills", ("st",), ""),
+            ("bstatus", "Show active brain agents with heartbeat health", "Tools & Skills", (), ""),
             ("claim", "Claim or release files for exclusive editing", "Tools & Skills", (), "[release] <file1> [file2 ...]"),
             ("post", "Post a message to the brain channel", "Tools & Skills", ("say",), "<message>"),
         ]
@@ -136,7 +147,7 @@ def _register_brain_commands(ctx) -> None:
 
     handlers = {
         "brain": _handle_brain_command,
-        "status": _handle_status_command,
+        "bstatus": _handle_status_command,
         "claim": _handle_claim_command,
         "post": _handle_post_command,
     }

@@ -116,34 +116,47 @@ const TEMP_FILE_PATTERNS = [
   const myEntry = process.argv[1]; // e.g. "/path/to/brain-mcp/dist/index.js"
   if (!myEntry) return;
 
+  // Only a sibling whose parent has died (reparented to init/launchd, ppid === 1) is a
+  // true zombie. A sibling with a live parent is the MCP child of an active Claude
+  // session — SIGTERMing it would disconnect that session's brain mid-task. The earlier
+  // implementation killed every process matching the entry script, so each new session's
+  // startup reaped all currently-connected sessions' brain servers.
+  const isOrphan = (ppid: number) => ppid === 1;
+
   let killed = 0;
   try {
     // Use ps to find sibling brain-mcp processes running the same entry script
-    const output = execFileSync('ps', ['axo', 'pid,command'], { encoding: 'utf8', timeout: 5000 });
+    const output = execFileSync('ps', ['axo', 'pid,ppid,command'], { encoding: 'utf8', timeout: 5000 });
     for (const line of output.split('\n')) {
-      const parts = line.trim().split(/\s+/);
+      const trimmed = line.trim();
+      if (!trimmed.includes(myEntry)) continue;
+      const parts = trimmed.split(/\s+/);
       const pid = parseInt(parts[0], 10);
+      const ppid = parseInt(parts[1], 10);
       if (!pid || pid === myPid) continue;
-      if (line.includes(myEntry)) {
-        try {
-          process.kill(pid, 'SIGTERM');
-          killed++;
-        } catch { /* already dead — skip */ }
-      }
+      if (!isOrphan(ppid)) continue; // live-parent sibling — serving an active session
+      try {
+        process.kill(pid, 'SIGTERM');
+        killed++;
+      } catch { /* already dead — skip */ }
     }
   } catch { /* ps may fail in constrained environments — best-effort */ }
 
-  // Wait briefly for graceful shutdown of siblings
+  // Wait briefly for graceful shutdown of the orphans we signalled
   if (killed > 0) {
     const waitUntil = Date.now() + 2000;
     while (Date.now() < waitUntil) {
       let stillAlive = 0;
       try {
-        const check = execFileSync('ps', ['axo', 'pid,command'], { encoding: 'utf8', timeout: 1000 });
+        const check = execFileSync('ps', ['axo', 'pid,ppid,command'], { encoding: 'utf8', timeout: 1000 });
         for (const line of check.split('\n')) {
-          const pid = parseInt(line.trim().split(/\s+/)[0], 10);
+          const trimmed = line.trim();
+          if (!trimmed.includes(myEntry)) continue;
+          const parts = trimmed.split(/\s+/);
+          const pid = parseInt(parts[0], 10);
+          const ppid = parseInt(parts[1], 10);
           if (!pid || pid === myPid) continue;
-          if (line.includes(myEntry)) stillAlive++;
+          if (isOrphan(ppid)) stillAlive++;
         }
       } catch { break; }
       if (stillAlive === 0) break;

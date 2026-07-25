@@ -2,48 +2,8 @@ import { z } from 'zod';
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync } from 'node:fs';
 import type { BrainDB } from '../db.js';
-
-function git(args: string[], cwd: string, opts: { encoding?: 'utf-8'; stdio?: any; maxBuffer?: number } = {}): string {
-  const out = execFileSync('git', args, {
-    cwd,
-    encoding: opts.encoding ?? 'utf-8',
-    stdio: opts.stdio ?? ['ignore', 'pipe', 'pipe'],
-    maxBuffer: opts.maxBuffer ?? 10 * 1024 * 1024,
-  });
-  return String(out);
-}
-
-function gitTry(args: string[], cwd: string): string | null {
-  try { return git(args, cwd); } catch { return null; }
-}
-
-// ── Schema helpers ──
-const cNum = () => z.preprocess(
-  (v) => typeof v === 'string' && v.trim() !== '' ? Number(v) : v,
-  z.number(),
-);
-const cBool = () => z.preprocess(
-  (v) => {
-    if (typeof v !== 'string') return v;
-    const s = v.toLowerCase().trim();
-    if (s === 'true' || s === '1' || s === 'yes') return true;
-    if (s === 'false' || s === '0' || s === 'no' || s === '') return false;
-    return v;
-  },
-  z.boolean(),
-);
-const cArr = <T extends z.ZodTypeAny>(item: T) => z.preprocess(
-  (v) => {
-    if (typeof v !== 'string') return v;
-    try {
-      const parsed = JSON.parse(v);
-      return Array.isArray(parsed) ? parsed : v;
-    } catch {
-      return v;
-    }
-  },
-  z.array(item),
-);
+import { git, gitTry } from '../git-runtime.js';
+import { cNum, cBool, cArr } from './schema-helpers.js';
 
 export interface GitToolsOptions {
   db: BrainDB;

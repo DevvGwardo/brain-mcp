@@ -52,9 +52,9 @@ import { BrainDB, type SessionStatus } from './db.js';
 import { runGateAndNotify, type GateResult } from './gate.js';
 import { resolvePiModelSpec } from './model-resolution.js';
 import { runPiCoreAgent } from './pi-core-agent.js';
-import { reconcileSessionExit } from './spawn-recovery.js';
-import { registerTmuxSessionRuntime, tmux, tmuxTry } from './tmux-runtime.js';
+import { registerTmuxSessionRuntime, sh, tmux, tmuxTry } from './tmux-runtime.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from './agent-watcher.js';
+import { attachTmuxWatcherFinalizer } from './watcher-finalizer.js';
 
 // ── ANSI helpers ──
 
@@ -265,35 +265,6 @@ function parseArgs(): PipelineConfig {
     model,
     thinkingLevel,
   };
-}
-
-// ── Shell escaping ──
-
-function sh(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function attachTmuxWatcherFinalizer(
-  db: BrainDB,
-  watcher: ReturnType<typeof spawnProcess>,
-  sessionId: string,
-  stateFile: string,
-) {
-  watcher.on('error', (err) => {
-    try { db.markDone(sessionId, -1, true, `watcher failed: ${err.message}`); } catch { /* best effort */ }
-  });
-  watcher.on('exit', () => {
-    try {
-      const raw = existsSync(stateFile) ? readFileSync(stateFile, 'utf8').trim() : '';
-      if (raw === 'timeout') {
-        reconcileSessionExit(db, sessionId, 124, 'tmux watcher timed out');
-      } else if (raw === 'pane_closed' || raw === '') {
-        reconcileSessionExit(db, sessionId, 0, 'tmux pane closed');
-      }
-    } catch { /* best effort */ }
-    try { rmSync(dirname(stateFile), { recursive: true, force: true }); } catch { /* best effort */ }
-  });
-  watcher.unref();
 }
 
 // ── Resolve path to agents/ directory (next to dist/) ──

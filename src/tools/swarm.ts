@@ -9,7 +9,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync, rmSync, unlinkSync, writeFileSync, closeSync } from 'node:fs';
-import { tmux, tmuxTry } from '../tmux-runtime.js';
+import { tmux, tmuxTry, sh } from '../tmux-runtime.js';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -74,8 +74,6 @@ function detectCliType(cliBase: string): CliType {
 }
 
 function buildHeadlessCmd(cliType: CliType, workspacePath: string, childEnv: string, cliBase: string, prompt: string, promptFile: string, model: string | undefined | null, logFile: string): string {
-  const sh = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
-
   switch (cliType) {
     case 'claude': {
       const modelFlag = model ? ` --model ${sh(model)}` : '';
@@ -105,8 +103,6 @@ function buildHeadlessCmd(cliType: CliType, workspacePath: string, childEnv: str
 }
 
 function buildTmuxCmd(cliType: CliType, workspacePath: string, childEnv: string, cliBase: string, modelFlag: string, model: string | undefined | null): string {
-  const sh = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
-
   switch (cliType) {
     case 'claude':
       return `cd ${sh(workspacePath)} && env ${childEnv} ${sh(cliBase)}${modelFlag} --dangerously-skip-permissions`;
@@ -132,17 +128,12 @@ function buildTmuxCmd(cliType: CliType, workspacePath: string, childEnv: string,
 function buildBashReadyPatterns(cliType: CliType): { readyPatterns: string; fallbackReady: string } {
   const markers = CLI_READY_MARKERS[cliType] || CLI_READY_MARKERS.other;
   const readyPatterns = markers.ready
-    .map(m => `echo "$CONTENT" | grep -q ${sh_for_bash(m)} 2>/dev/null`)
+    .map(m => `echo "$CONTENT" | grep -q ${sh(m)} 2>/dev/null`)
     .join(' || ');
   const fallbackReady = markers.fallback
-    .map(m => `echo "$CONTENT" | grep -q ${sh_for_bash(m)} 2>/dev/null`)
+    .map(m => `echo "$CONTENT" | grep -q ${sh(m)} 2>/dev/null`)
     .join(' || ');
   return { readyPatterns, fallbackReady };
-}
-
-function sh_for_bash(s: string): string {
-  // Escape for bash single-quote context in watcher script
-  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 export function registerSwarmTools(
@@ -153,12 +144,6 @@ export function registerSwarmTools(
     db, room, roomLabel, ensureSession, getSessionId, getSessionName,
     startLeadWatchdog, prepareAgentWorkspace, incrementSpawnedAgentCount,
   } = options;
-
-
-
-  function sh(value: string): string {
-    return `'${value.replace(/'/g, `'\\\\''`)}'`;
-  }
 
   // ── swarm ────────────────────────────────────────────────────────────────────
   server.tool(

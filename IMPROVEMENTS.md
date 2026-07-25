@@ -125,7 +125,9 @@ A breadth-first parallel swarm against this codebase is the wrong move because (
 - 🐛 **Fixed (in daemon mode)**: pi mode's asymmetric `systemFile` cleanup (leaked on timeout, deleted on pane_closed) — daemon path runs `cleanup_paths` on both terminal kinds.
 - 🐛 **Fixed (in daemon mode)**: `src/tools/router-tools.ts` and `src/tools/swarm.ts` previously left DB rows stale on normal pane closure — daemon path reconciles via `reconcileSessionExit`. Bash mode at those callsites still has the gap (out of scope).
 - 📝 `src/index.ts:1496` hardcoded `ABSOLUTE_TIMEOUT=3600` for swarm v2 ignores user-supplied `agentTimeout`. Daemon path preserves parity (still passes 3600). Consider fixing in a follow-up.
-- 📝 `attachTmuxWatcherFinalizer` is defined identically twice (`src/index.ts:183` and `src/conductor.ts:247`). Cleanup candidate for the post-burn-in PR.
+- ✅ `attachTmuxWatcherFinalizer` consolidated into `src/watcher-finalizer.ts` (was duplicated in `index.ts` + `conductor.ts`).
+- ✅ `git`/`gitTry` consolidated into `src/git-runtime.ts` (was duplicated in `index.ts` + `tools/git.ts`).
+- ✅ `sh()` shell-quoting exported from `tmux-runtime.ts`; removed copies in `index.ts`, `conductor.ts`, `swarm.ts`.
 
 **Actuals vs estimate:** estimate was ~400 new / ~250 deleted, single PR. Actuals: ~520 new (`src/agent-watcher.ts` ~340, `src/agent-watcher.test.ts` ~150, db schema/API ~167), ~0 deleted (bash code retained behind flag — deletion is the follow-up). One PR.
 

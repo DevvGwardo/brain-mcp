@@ -3,7 +3,7 @@ import type { BrainDB, Session } from './db.js';
 
 type ExecRunner = (command: string, options?: { encoding?: 'utf8'; stdio?: any }) => string | Buffer;
 
-function sh(value: string): string {
+export function sh(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 

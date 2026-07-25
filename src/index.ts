@@ -18,10 +18,12 @@ import { compileWorkflow } from './workflow.js';
 import { spawnWithRecovery, cleanupSpawnTempFiles, freshestMtime, reconcileSessionExit } from './spawn-recovery.js';
 import { renderTool } from './renderer.js';
 import { createServerLogger } from './server-log.js';
-import { registerTmuxSessionRuntime, tmux, tmuxTry } from './tmux-runtime.js';
+import { registerTmuxSessionRuntime, sh, tmux, tmuxTry } from './tmux-runtime.js';
 import { enqueueDaemonWatch, watcherModeFromEnv } from './agent-watcher.js';
 import { SPAWN_TMP_PREFIX, defaultAgentTimeoutSec } from './constants.js';
 import { agentEnvShellPairs } from './agent-env.js';
+import { git, gitTry } from './git-runtime.js';
+import { attachTmuxWatcherFinalizer } from './watcher-finalizer.js';
 
 // ── Schema helpers (string-coercion for transports that stringify params) ──
 // Some MCP bridges (e.g. Telegram → Hermes) serialize every tool argument as
@@ -208,24 +210,6 @@ function ack(extra?: Record<string, any>): { content: [{ type: 'text'; text: str
   return reply({ ok: true, ...extra }, { ok: 1, ...extra });
 }
 
-function git(args: string[], cwd: string, opts: { encoding?: 'utf-8'; stdio?: any; maxBuffer?: number } = {}): string {
-  const out = execFileSync('git', args, {
-    cwd,
-    encoding: opts.encoding ?? 'utf-8',
-    stdio: opts.stdio ?? ['ignore', 'pipe', 'pipe'],
-    maxBuffer: opts.maxBuffer ?? 10 * 1024 * 1024,
-  });
-  return String(out);
-}
-
-function gitTry(args: string[], cwd: string): string | null {
-  try { return git(args, cwd); } catch { return null; }
-}
-
-function sh(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 function compileWorkflowForRoom(
   goal: string,
   options: {
@@ -261,28 +245,6 @@ type IsolationMode = 'shared' | 'snapshot';
 
 function sanitizeName(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'agent';
-}
-
-function attachTmuxWatcherFinalizer(
-  watcher: ReturnType<typeof spawn>,
-  sessionId: string,
-  stateFile: string,
-) {
-  watcher.on('error', (err) => {
-    try { db.markDone(sessionId, -1, true, `watcher failed: ${err.message}`); } catch { /* best effort */ }
-  });
-  watcher.on('exit', () => {
-    try {
-      const raw = existsSync(stateFile) ? readFileSync(stateFile, 'utf8').trim() : '';
-      if (raw === 'timeout') {
-        reconcileSessionExit(db, sessionId, 124, 'tmux watcher timed out');
-      } else if (raw === 'pane_closed' || raw === '') {
-        reconcileSessionExit(db, sessionId, 0, 'tmux pane closed');
-      }
-    } catch { /* best effort */ }
-    try { rmSync(dirname(stateFile), { recursive: true, force: true }); } catch { /* best effort */ }
-  });
-  watcher.unref();
 }
 
 function prepareAgentWorkspace(baseCwd: string, agentName: string, isolation: IsolationMode): string {
@@ -1694,7 +1656,7 @@ printf '%s\n' "pane_closed" > "$STATE_FILE"
 `;
           writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
           const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-          attachTmuxWatcherFinalizer(watcher, agentSessionId, watcherStateFile);
+          attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
         }
 
         spawned.push({ name: agentName, sessionId: agentSessionId, taskId, workspace: workspacePath });
@@ -2760,7 +2722,7 @@ printf '%s\n' "pane_closed" > "$STATE_FILE"
         writeFileSync(watcherFile, watcherContent, { mode: 0o755 });
 
         const watcher = spawn('bash', [watcherFile], { detached: true, stdio: 'ignore' });
-        attachTmuxWatcherFinalizer(watcher, agentSessionId, watcherStateFile);
+        attachTmuxWatcherFinalizer(db, watcher, agentSessionId, watcherStateFile);
       }
 
       const layoutDesc: Record<string, string> = {
